@@ -1,0 +1,232 @@
+'==============================================================
+' PRINT.BM - Impresion
+' PrintDoc(idx) se llama desde los editores con Ctrl+P.
+' Reune el contenido en PLine$(1..PCount), lo pagina (margen,
+' lineas por pagina, encabezado y numero de pagina) y lo escribe
+' en un archivo de texto. "Imprimir" envia ese archivo a la
+' impresora predeterminada del sistema.
+' Opciones (compartidas): PrtLeft, PrtLines, PrtHeader$, PrtNum
+'==============================================================
+
+' Pasa los caracteres acentuados de CP437 a Latin-1 (Windows)
+FUNCTION ToLatin1$ (t$)
+    DIM o$, i, a
+    o$ = ""
+    FOR i = 1 TO LEN(t$)
+        a = ASC(MID$(t$, i, 1))
+        SELECT CASE a
+            CASE 160: a = 225
+            CASE 130: a = 233
+            CASE 161: a = 237
+            CASE 162: a = 243
+            CASE 163: a = 250
+            CASE 164: a = 241
+            CASE 165: a = 209
+            CASE 129: a = 252
+            CASE 154: a = 220
+            CASE 181: a = 193
+            CASE 144: a = 201
+            CASE 214: a = 205
+            CASE 224: a = 211
+            CASE 233: a = 218
+            CASE 168: a = 191
+            CASE 173: a = 161
+        END SELECT
+        o$ = o$ + CHR$(a)
+    NEXT
+    ToLatin1$ = o$
+END FUNCTION
+
+' Pide un texto en una pantalla propia (Cancelled = -1 si Esc)
+FUNCTION AskLine$ (ttl$, p$, init$, maxLen)
+    DIM r$
+    CLS
+    TitleBar ttl$
+    PrintAt 4, 3, p$, 15, 0
+    HelpBar "Enter: aceptar   Esc: cancelar"
+    r$ = ReadLine$(6, 3, maxLen, init$)
+    AskLine$ = r$
+END FUNCTION
+
+' Reune el contenido del archivo idx en PLine$ (PCount lineas)
+SUB GatherLines (idx)
+    DIM s, i, r, c, maxR, maxC, ln$
+    s = Desk(idx).Slot
+    PCount = 0
+    SELECT CASE Desk(idx).Tipo
+        CASE 1
+            FOR i = 1 TO WPLines(s)
+                PCount = PCount + 1
+                PLine$(PCount) = WPText$(s, i)
+            NEXT
+            ' quitar lineas vacias al final
+            DO WHILE PCount > 0
+                IF PLine$(PCount) = "" THEN
+                    PCount = PCount - 1
+                ELSE
+                    EXIT DO
+                END IF
+            LOOP
+        CASE 2
+            maxR = 0
+            maxC = 0
+            FOR r = 1 TO MAXROWS
+                FOR c = 1 TO MAXCOLS
+                    IF SSRaw$(s, r, c) <> "" THEN
+                        IF r > maxR THEN maxR = r
+                        IF c > maxC THEN maxC = c
+                    END IF
+                NEXT
+            NEXT
+            FOR r = 1 TO maxR
+                ln$ = ""
+                FOR c = 1 TO maxC
+                    ln$ = ln$ + SSCellStr$(s, r, c) + " "
+                NEXT
+                PCount = PCount + 1
+                PLine$(PCount) = RTRIM$(ln$)
+            NEXT
+        CASE 3
+            IF dViewN > 0 THEN
+                rDest = 3
+                DBReportLines 1
+            END IF
+    END SELECT
+END SUB
+
+' Escribe el encabezado de una pagina; devuelve cuantas lineas uso
+FUNCTION WriteHeader (ff, pg)
+    DIM h$, p$, m$
+    WriteHeader = 0
+    IF PrtHeader$ = "" AND PrtNum = 0 THEN EXIT FUNCTION
+    m$ = SPACE$(PrtLeft)
+    h$ = LEFT$(PrtHeader$, 55)
+    IF PrtNum THEN
+        p$ = "Pagina " + N2S$(pg)
+        h$ = h$ + SPACE$(70 - LEN(h$) - LEN(p$)) + p$
+    END IF
+    IF ErrFlag = 0 THEN PRINT #ff, m$ + ToLatin1$(h$)
+    IF ErrFlag = 0 THEN PRINT #ff, ""
+    WriteHeader = 2
+END FUNCTION
+
+' Escribe PLine$ paginado en el archivo f$. Devuelve -1 si salio bien.
+FUNCTION PrintWrite (f$)
+    DIM ff, i, pg, onPage, m$
+    m$ = SPACE$(PrtLeft)
+    ff = FREEFILE
+    ErrFlag = 0
+    ON ERROR GOTO FileErr
+    OPEN f$ FOR OUTPUT AS #ff
+    IF ErrFlag = 0 THEN
+        pg = 1
+        onPage = 0
+        FOR i = 1 TO PCount
+            IF onPage = 0 THEN onPage = WriteHeader(ff, pg)
+            IF ErrFlag = 0 THEN PRINT #ff, m$ + ToLatin1$(PLine$(i))
+            onPage = onPage + 1
+            IF onPage >= PrtLines AND i < PCount THEN
+                IF ErrFlag = 0 THEN PRINT #ff, CHR$(12);
+                pg = pg + 1
+                onPage = 0
+            END IF
+        NEXT
+    END IF
+    CLOSE #ff
+    ON ERROR GOTO 0
+    IF ErrFlag = 0 THEN
+        PrintWrite = -1
+    ELSE
+        PrintWrite = 0
+    END IF
+END FUNCTION
+
+SUB PrintToFile (idx)
+    DIM f$
+    f$ = RTRIM$(Desk(idx).Nombre) + ".TXT"
+    IF _FILEEXISTS(f$) THEN
+        IF NOT Confirm("Ya existe " + f$ + ". Reemplazarlo?") THEN EXIT SUB
+    END IF
+    IF PrintWrite(f$) THEN
+        Msg f$ + " guardado (" + N2S$(PCount) + " lineas)"
+    ELSE
+        Msg "No se pudo escribir " + f$
+    END IF
+END SUB
+
+SUB PrintToPrinter
+    DIM f$
+    f$ = "QBWPRINT.TXT"
+    IF NOT PrintWrite(f$) THEN
+        Msg "No se pudo preparar la impresion"
+        EXIT SUB
+    END IF
+    IF INSTR(_OS$, "WIN") THEN
+        SHELL _HIDE "cmd /c notepad /p " + f$
+    ELSE
+        SHELL "lp " + f$
+    END IF
+    Msg "Enviado a la impresora (archivo QBWPRINT.TXT)"
+END SUB
+
+' Pantalla de impresion del archivo idx
+SUB PrintDoc (idx)
+    DIM choice, sel, a$, v, h$, n$
+    GatherLines idx
+    IF PCount = 0 THEN
+        StatusMsg$ = "No hay nada que imprimir"
+        EXIT SUB
+    END IF
+    sel = 5
+    DO
+        CLS
+        TitleBar "Imprimir - " + RTRIM$(Desk(idx).Nombre)
+        PrintAt 3, 3, N2S$(PCount) + " lineas para imprimir", 15, 0
+        IF PrtHeader$ = "" THEN h$ = "(ninguno)" ELSE h$ = PrtHeader$
+        IF PrtNum THEN n$ = "Si" ELSE n$ = "No"
+        MenuCount = 7
+        MenuItem$(1) = "1. Margen izquierdo: " + N2S$(PrtLeft) + " columnas"
+        MenuItem$(2) = "2. Lineas por pagina: " + N2S$(PrtLines)
+        MenuItem$(3) = "3. Encabezado: " + h$
+        MenuItem$(4) = "4. Numerar las paginas: " + n$
+        MenuItem$(5) = "5. Imprimir en la impresora"
+        MenuItem$(6) = "6. Guardar como archivo de texto (.TXT)"
+        MenuItem$(7) = "7. Volver"
+        HelpBar "Flechas: mover   Enter: elegir   Esc: volver"
+        choice = RunMenu(5, 5, sel)
+        IF choice > 0 THEN sel = choice
+        SELECT CASE choice
+            CASE 1
+                a$ = AskLine$("Imprimir", "Margen izquierdo (0 a 20 columnas):", N2S$(PrtLeft), 3)
+                IF NOT Cancelled THEN
+                    v = VAL(a$)
+                    IF v >= 0 AND v <= 20 THEN
+                        PrtLeft = v
+                    ELSE
+                        Msg "Use un valor de 0 a 20"
+                    END IF
+                END IF
+            CASE 2
+                a$ = AskLine$("Imprimir", "Lineas por pagina (20 a 100):", N2S$(PrtLines), 3)
+                IF NOT Cancelled THEN
+                    v = VAL(a$)
+                    IF v >= 20 AND v <= 100 THEN
+                        PrtLines = v
+                    ELSE
+                        Msg "Use un valor de 20 a 100"
+                    END IF
+                END IF
+            CASE 3
+                a$ = AskLine$("Imprimir", "Encabezado (vacio = ninguno):", PrtHeader$, 40)
+                IF NOT Cancelled THEN PrtHeader$ = LTRIM$(RTRIM$(a$))
+            CASE 4
+                PrtNum = NOT PrtNum
+            CASE 5
+                PrintToPrinter
+            CASE 6
+                PrintToFile idx
+            CASE 0, 7
+                EXIT SUB
+        END SELECT
+    LOOP
+END SUB

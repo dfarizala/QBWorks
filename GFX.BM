@@ -1,0 +1,132 @@
+'==============================================================
+' GFX.BM - Ventana grafica con aspecto de monitor Apple II
+' (nivel 2). El programa sigue escribiendo con PRINT / LOCATE /
+' COLOR, pero ahora sobre una imagen de 80x25 caracteres
+' (textScr). Cada cuadro, GfxPresent copia esa imagen ampliada
+' a la ventana (winScr), le pone borde de monitor, lineas de
+' barrido y un cursor de bloque que parpadea.
+'
+' Fuente: si en la carpeta del programa esta PrintChar21.ttf
+' (fuente tipo Apple II) se usa; si no, la fuente interna 8x16.
+' Una fuente de 8 puntos de alto se ensancha al doble en
+' vertical, como los pixeles del Apple II.
+'
+' Variables (declaradas en QBWORKS.BAS):
+'   GfxOn      -1 si la ventana grafica esta activa
+'   textScr    imagen donde se escribe el texto (256 colores)
+'   winScr     ventana visible (32 bits)
+'   scanImg    superposicion de lineas de barrido
+'   GfxFW/FH   ancho y alto de un caracter en pixeles
+'   GfxTW/TH   ancho y alto de la imagen de texto
+'   GfxVS      ensanchamiento vertical (1 o 2)
+'   GfxSc      factor de ampliacion entero
+'   GfxMargin  ancho del borde del monitor
+'==============================================================
+
+SUB InitGfx
+    DIM fw, fh, dw, dh, aw, ah, sc, tw, th, w, h, y, band, hpx
+    DIM sx#, sy#
+    GfxOn = 0
+    gfxFont = 0
+    IF _FILEEXISTS("PrintChar21.ttf") THEN
+        gfxFont = _LOADFONT("PrintChar21.ttf", 8, "MONOSPACE")
+    END IF
+    IF gfxFont > 0 THEN
+        fw = _FONTWIDTH(gfxFont)
+        fh = _FONTHEIGHT(gfxFont)
+        IF fw < 4 OR fh < 6 THEN gfxFont = 0
+    END IF
+    IF gfxFont <= 0 THEN
+        gfxFont = 0
+        fw = 8
+        fh = 16
+    END IF
+    GfxFW = fw
+    GfxFH = fh
+    IF fh <= 10 THEN
+        GfxVS = 2
+    ELSE
+        GfxVS = 1
+    END IF
+    tw = 80 * fw
+    th = 25 * fh
+    GfxTW = tw
+    GfxTH = th
+    GfxMargin = 28
+
+    ' factor de ampliacion segun el tamano del escritorio
+    dw = _DESKTOPWIDTH
+    dh = _DESKTOPHEIGHT
+    aw = dw * .92 - 2 * GfxMargin
+    ah = dh * .85 - 2 * GfxMargin
+    sx# = aw / tw
+    sy# = ah / (th * GfxVS)
+    IF sy# < sx# THEN sx# = sy#
+    sc = INT(sx#)
+    IF sc < 1 THEN sc = 1
+    IF sc > 3 THEN sc = 3
+    GfxSc = sc
+
+    w = tw * sc + 2 * GfxMargin
+    h = th * sc * GfxVS + 2 * GfxMargin
+    textScr = _NEWIMAGE(tw, th, 256)
+    winScr = _NEWIMAGE(w, h, 32)
+    IF textScr >= -1 OR winScr >= -1 THEN EXIT SUB
+
+    SCREEN winScr
+    _DEST winScr
+    CLS , _RGB32(26, 26, 26)
+    _DEST textScr
+    IF gfxFont > 0 THEN _FONT gfxFont, textScr
+
+    ' lineas de barrido: una franja oscura al pie de cada fila de pixeles
+    scanImg = _NEWIMAGE(tw * sc, th * sc * GfxVS, 32)
+    IF scanImg < -1 THEN
+        hpx = sc * GfxVS
+        band = hpx \ 4
+        IF band < 1 THEN band = 1
+        _DEST scanImg
+        FOR y = 0 TO th - 1
+            LINE (0, y * hpx + hpx - band)-(tw * sc - 1, y * hpx + hpx - 1), _RGBA32(0, 0, 0, 120), BF
+        NEXT
+        _DEST textScr
+    END IF
+    GfxOn = -1
+    _DISPLAY
+END SUB
+
+' Copia la imagen de texto a la ventana (se llama en cada espera de tecla)
+SUB GfxPresent
+    DIM r, c, x1, y1, sy
+    DIM cc AS LONG
+    IF GfxOn = 0 THEN EXIT SUB
+    r = CSRLIN
+    c = POS(0)
+    sy = GfxSc * GfxVS
+    _DEST winScr
+    _PUTIMAGE (GfxMargin, GfxMargin)-(GfxMargin + GfxTW * GfxSc - 1, GfxMargin + GfxTH * sy - 1), textScr, winScr
+    IF CursorWanted THEN
+        IF (INT(TIMER * 2) MOD 2) = 0 THEN
+            cc = _PALETTECOLOR(15, textScr)
+            x1 = GfxMargin + (c - 1) * GfxFW * GfxSc
+            y1 = GfxMargin + (r - 1) * GfxFH * sy
+            LINE (x1, y1)-(x1 + GfxFW * GfxSc - 1, y1 + GfxFH * sy - 1), _RGBA32(_RED32(cc), _GREEN32(cc), _BLUE32(cc), 170), BF
+        END IF
+    END IF
+    IF ScanOn AND scanImg < -1 THEN _PUTIMAGE (GfxMargin, GfxMargin), scanImg, winScr
+    _DISPLAY
+    _DEST textScr
+END SUB
+
+' Recuadro dibujado con lineas (la fuente Apple II no trae los
+' caracteres de marco). Mismas coordenadas de caracteres que Box.
+SUB GfxBox (r1, c1, r2, c2)
+    DIM xa, ya, xb, yb, col
+    col = _DEFAULTCOLOR
+    LINE ((c1 - 1) * GfxFW, (r1 - 1) * GfxFH)-(c2 * GfxFW - 1, r2 * GfxFH - 1), 0, BF
+    xa = (c1 - 1) * GfxFW + GfxFW \ 2
+    xb = (c2 - 1) * GfxFW + GfxFW \ 2
+    ya = (r1 - 1) * GfxFH + GfxFH \ 2
+    yb = (r2 - 1) * GfxFH + GfxFH \ 2
+    LINE (xa, ya)-(xb, yb), col, B
+END SUB

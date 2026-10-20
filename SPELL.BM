@@ -1,0 +1,387 @@
+'==============================================================
+' SPELL.BM - Corrector ortografico (para el procesador de textos)
+' Diccionario en una tabla hash (SpHash$) con palabras en
+' minusculas. Se llena con:
+'   1. una lista basica incluida aqui (palabras de uso comun),
+'   2. DICCIO.TXT (opcional): lista de palabras, una por linea,
+'      que usted ponga en la carpeta del programa,
+'   3. MIDIC.TXT: palabras que usted agrega durante la revision.
+' Los archivos pueden estar en UTF-8 o Latin-1; el programa los
+' convierte al juego de caracteres de la pantalla (CP437).
+'==============================================================
+
+FUNCTION HashW& (w$)
+    DIM h AS LONG
+    DIM i
+    h = 5381
+    FOR i = 1 TO LEN(w$)
+        h = (h * 33 + ASC(MID$(w$, i, 1))) MOD HSIZE
+    NEXT
+    HashW& = h
+END FUNCTION
+
+SUB SpAdd (w$)
+    DIM idx AS LONG
+    IF w$ = "" OR SpCount >= 230000 THEN EXIT SUB
+    idx = HashW&(w$)
+    DO WHILE SpHash$(idx) <> ""
+        IF SpHash$(idx) = w$ THEN EXIT SUB
+        idx = idx + 1
+        IF idx >= HSIZE THEN idx = 0
+    LOOP
+    SpHash$(idx) = w$
+    SpCount = SpCount + 1
+END SUB
+
+' -1 si la palabra (en minusculas) esta en el diccionario
+FUNCTION SpHas (w$)
+    DIM idx AS LONG
+    SpHas = 0
+    IF w$ = "" THEN EXIT FUNCTION
+    idx = HashW&(w$)
+    DO WHILE SpHash$(idx) <> ""
+        IF SpHash$(idx) = w$ THEN
+            SpHas = -1
+            EXIT FUNCTION
+        END IF
+        idx = idx + 1
+        IF idx >= HSIZE THEN idx = 0
+    LOOP
+END FUNCTION
+
+' Minusculas, incluyendo las letras acentuadas de CP437
+FUNCTION LowerCP$ (t$)
+    DIM o$, i, a
+    o$ = ""
+    FOR i = 1 TO LEN(t$)
+        a = ASC(MID$(t$, i, 1))
+        SELECT CASE a
+            CASE 65 TO 90: a = a + 32
+            CASE 181: a = 160
+            CASE 144: a = 130
+            CASE 214: a = 161
+            CASE 224: a = 162
+            CASE 233: a = 163
+            CASE 165: a = 164
+            CASE 154: a = 129
+        END SELECT
+        o$ = o$ + CHR$(a)
+    NEXT
+    LowerCP$ = o$
+END FUNCTION
+
+' Convierte una palabra de un archivo (UTF-8 o Latin-1) a CP437
+FUNCTION DictToCP$ (t$)
+    DIM o$, i, a, b
+    o$ = ""
+    i = 1
+    DO WHILE i <= LEN(t$)
+        a = ASC(MID$(t$, i, 1))
+        IF a = 195 AND i < LEN(t$) THEN
+            b = ASC(MID$(t$, i + 1, 1))
+            SELECT CASE b
+                CASE 161, 129: o$ = o$ + CHR$(160)
+                CASE 169, 137: o$ = o$ + CHR$(130)
+                CASE 173, 141: o$ = o$ + CHR$(161)
+                CASE 179, 147: o$ = o$ + CHR$(162)
+                CASE 186, 154: o$ = o$ + CHR$(163)
+                CASE 177, 145: o$ = o$ + CHR$(164)
+                CASE 188, 156: o$ = o$ + CHR$(129)
+                CASE ELSE: o$ = o$ + "?"
+            END SELECT
+            i = i + 2
+        ELSE
+            SELECT CASE a
+                CASE 225, 193: o$ = o$ + CHR$(160)
+                CASE 233, 201: o$ = o$ + CHR$(130)
+                CASE 237, 205: o$ = o$ + CHR$(161)
+                CASE 243, 211: o$ = o$ + CHR$(162)
+                CASE 250, 218: o$ = o$ + CHR$(163)
+                CASE 241, 209: o$ = o$ + CHR$(164)
+                CASE 252, 220: o$ = o$ + CHR$(129)
+                CASE ELSE: o$ = o$ + CHR$(a)
+            END SELECT
+            i = i + 1
+        END IF
+    LOOP
+    DictToCP$ = o$
+END FUNCTION
+
+' Escapes de la lista basica: 'a 'e 'i 'o 'u = vocales con tilde, ~n = enie
+FUNCTION Esc2CP$ (t$)
+    DIM o$, i, ch$, nx$
+    o$ = ""
+    i = 1
+    DO WHILE i <= LEN(t$)
+        ch$ = MID$(t$, i, 1)
+        nx$ = ""
+        IF i < LEN(t$) THEN nx$ = MID$(t$, i + 1, 1)
+        IF ch$ = "'" AND nx$ <> "" AND INSTR("aeiou", nx$) > 0 THEN
+            SELECT CASE nx$
+                CASE "a": o$ = o$ + CHR$(160)
+                CASE "e": o$ = o$ + CHR$(130)
+                CASE "i": o$ = o$ + CHR$(161)
+                CASE "o": o$ = o$ + CHR$(162)
+                CASE "u": o$ = o$ + CHR$(163)
+            END SELECT
+            i = i + 2
+        ELSEIF ch$ = "~" AND nx$ = "n" THEN
+            o$ = o$ + CHR$(164)
+            i = i + 2
+        ELSE
+            o$ = o$ + ch$
+            i = i + 1
+        END IF
+    LOOP
+    Esc2CP$ = o$
+END FUNCTION
+
+FUNCTION IsWordChar (ch$)
+    DIM a
+    a = ASC(ch$)
+    IsWordChar = 0
+    IF (a >= 65 AND a <= 90) OR (a >= 97 AND a <= 122) OR (a >= 48 AND a <= 57) THEN
+        IsWordChar = -1
+    ELSEIF a = 129 OR a = 130 OR a = 144 OR a = 154 OR a = 160 OR a = 161 OR a = 162 OR a = 163 OR a = 164 OR a = 165 OR a = 181 OR a = 214 OR a = 224 OR a = 233 THEN
+        IsWordChar = -1
+    END IF
+END FUNCTION
+
+' -1 si hay que revisar la palabra (no numeros, no siglas, no 1 letra)
+FUNCTION NeedCheck (w$)
+    DIM i, a
+    NeedCheck = 0
+    IF LEN(w$) < 2 THEN EXIT FUNCTION
+    FOR i = 1 TO LEN(w$)
+        a = ASC(MID$(w$, i, 1))
+        IF a >= 48 AND a <= 57 THEN EXIT FUNCTION
+    NEXT
+    IF w$ = UCASE$(w$) THEN EXIT FUNCTION
+    NeedCheck = -1
+END FUNCTION
+
+SUB SpLoadStarter
+    DIM s$, p, w$
+    s$ = ""
+    s$ = s$ + "el la los las un una unos unas lo al del a ante bajo cabe con contra de desde durante en entre hacia hasta mediante para por seg'un sin so sobre tras "
+    s$ = s$ + "y e o u ni que pero sino aunque como cuando donde si porque pues mientras yo t'u 'el ella ello nosotros nosotras vosotros vosotras ellos ellas "
+    s$ = s$ + "me te se nos os le les mi mis tu tus su sus nuestro nuestra nuestros nuestras vuestro vuestra este esta esto estos estas ese esa eso esos esas "
+    s$ = s$ + "aquel aquella aquello aquellos aquellas quien quienes cual cuales cuyo cuya cuyos cuyas qu'e c'omo cu'ando d'onde cu'al cu'anto cu'anta cu'antos cu'antas qui'en "
+    s$ = s$ + "m'i t'i conmigo contigo consigo no s'i ya muy m'as menos tan tanto tanta tantos tantas bien mal aqu'i ah'i all'i ac'a all'a hoy ayer ma~nana siempre nunca "
+    s$ = s$ + "tambi'en tampoco solo s'olo todav'ia adem'as as'i entonces luego despu'es antes cerca lejos dentro fuera arriba abajo delante detr'as encima debajo casi apenas "
+    s$ = s$ + "quiz'a quiz'as acaso mejor peor poco poca pocos pocas mucho mucha muchos muchas todo toda todos todas otro otra otros otras cada alg'un alguno alguna algunos algunas "
+    s$ = s$ + "ning'un ninguno ninguna varios varias mismo misma mismos mismas propio propia uno dos tres cuatro cinco seis siete ocho nueve diez once doce trece catorce quince "
+    s$ = s$ + "veinte treinta cuarenta cincuenta cien mil primero primera segundo segunda tercero tercera ser es son soy eres somos sois fue fueron era eran ser'a ser'an sea sean "
+    s$ = s$ + "sido siendo estar est'a est'an estoy est'as estamos estaba estaban estuvo estar'a est'e est'en haber ha han he has hemos hab'ia hab'ian hubo habr'a haya hay habido "
+    s$ = s$ + "tener tiene tienen tengo tienes tenemos ten'ia ten'ian tuvo tendr'a tenga tenido hacer hace hacen hago haces hacemos hac'ia hizo har'a hecho poder puede pueden puedo "
+    s$ = s$ + "puedes podemos pod'ia pudo podr'a podido ir va van voy vas vamos iba iban ido ver ve ven veo vemos visto decir dice dicen digo dijo dicho dar da dan doy damos dio dado "
+    s$ = s$ + "saber sabe saben s'e sabemos sab'ia sabido querer quiere quieren quiero queremos quer'ia venir viene vienen vengo vino venido poner pone ponen pongo puso puesto "
+    s$ = s$ + "llegar llega llegan llevar lleva llevan pasar pasa pasan seguir sigue siguen creer cree creen creo hablar habla hablan hablo dejar deja dejan encontrar encuentra "
+    s$ = s$ + "parecer parece parecen pensar piensa pienso tomar toma toman conocer conoce sentir siente vivir vive viven vivo trabajar trabaja trabajan usar usa usan necesitar "
+    s$ = s$ + "necesita escribir escribe escrito leer lee le'ido a~no a~nos d'ia d'ias vez veces cosa cosas parte tiempo vida mundo caso persona personas gente forma lugar "
+    s$ = s$ + "trabajo casa ciudad pa'is hombre mujer ni~no ni~na ni~nos ni~nas amigo amiga amigos amigas se~nor se~nora mano manos agua nombre texto hoja datos base archivo "
+    s$ = s$ + "documento p'agina l'inea "
+    DO
+        p = INSTR(s$, " ")
+        IF p = 0 THEN EXIT DO
+        w$ = LEFT$(s$, p - 1)
+        s$ = MID$(s$, p + 1)
+        IF w$ <> "" THEN SpAdd LowerCP$(Esc2CP$(w$))
+    LOOP
+END SUB
+
+' Agrega las palabras de un archivo (una por linea; ignora lo que
+' sigue a "/" o a un espacio, y las lineas que son solo un numero)
+SUB SpLoadFile (f$)
+    DIM ff, l$, p
+    IF NOT _FILEEXISTS(f$) THEN EXIT SUB
+    ff = FREEFILE
+    ErrFlag = 0
+    ON ERROR GOTO FileErr
+    OPEN f$ FOR INPUT AS #ff
+    DO WHILE NOT EOF(ff) AND ErrFlag = 0
+        LINE INPUT #ff, l$
+        IF ErrFlag = 0 THEN
+            p = INSTR(l$, "/")
+            IF p > 0 THEN l$ = LEFT$(l$, p - 1)
+            l$ = LTRIM$(RTRIM$(l$))
+            p = INSTR(l$, " ")
+            IF p > 0 THEN l$ = LEFT$(l$, p - 1)
+            IF l$ <> "" THEN
+                IF NOT IsNumber(l$) THEN SpAdd LowerCP$(DictToCP$(l$))
+            END IF
+        END IF
+    LOOP
+    CLOSE #ff
+    ON ERROR GOTO 0
+END SUB
+
+' Agrega una palabra al diccionario personal (MIDIC.TXT)
+SUB SpAppendUser (w$)
+    DIM ff
+    ff = FREEFILE
+    ErrFlag = 0
+    ON ERROR GOTO FileErr
+    OPEN "MIDIC.TXT" FOR APPEND AS #ff
+    IF ErrFlag = 0 THEN PRINT #ff, w$
+    CLOSE #ff
+    ON ERROR GOTO 0
+    IF ErrFlag THEN StatusMsg$ = "No se pudo guardar en MIDIC.TXT"
+END SUB
+
+SUB SpLoad
+    CLS
+    TitleBar "Ortografia"
+    PrintAt 5, 5, "Cargando el diccionario...", 14, 0
+    GfxPresent
+    SpLoadStarter
+    SpLoadFile "DICCIO.TXT"
+    SpLoadFile "MIDIC.TXT"
+    SpLoaded = -1
+END SUB
+
+'--------------------------------------------------------------
+'  SUGERENCIAS (palabras del diccionario a una letra de distancia)
+'--------------------------------------------------------------
+SUB SugTry (c$)
+    DIM i
+    IF SugN >= 5 THEN EXIT SUB
+    IF c$ = "" THEN EXIT SUB
+    IF SpHas(c$) = 0 THEN EXIT SUB
+    FOR i = 1 TO SugN
+        IF SugList$(i) = c$ THEN EXIT SUB
+    NEXT
+    SugN = SugN + 1
+    SugList$(SugN) = c$
+END SUB
+
+SUB SpSuggest (w$)
+    DIM i, j, n, alpha$, a$
+    SugN = 0
+    n = LEN(w$)
+    IF n < 2 OR n > 20 THEN EXIT SUB
+    alpha$ = "abcdefghijklmnopqrstuvwxyz" + CHR$(164) + CHR$(160) + CHR$(130) + CHR$(161) + CHR$(162) + CHR$(163) + CHR$(129)
+    FOR i = 1 TO n - 1
+        SugTry LEFT$(w$, i - 1) + MID$(w$, i + 1, 1) + MID$(w$, i, 1) + MID$(w$, i + 2)
+    NEXT
+    FOR i = 1 TO n
+        SugTry LEFT$(w$, i - 1) + MID$(w$, i + 1)
+    NEXT
+    FOR i = 1 TO n
+        FOR j = 1 TO LEN(alpha$)
+            a$ = MID$(alpha$, j, 1)
+            SugTry LEFT$(w$, i - 1) + a$ + MID$(w$, i + 1)
+        NEXT
+    NEXT
+    FOR i = 0 TO n
+        FOR j = 1 TO LEN(alpha$)
+            a$ = MID$(alpha$, j, 1)
+            SugTry LEFT$(w$, i) + a$ + MID$(w$, i + 1)
+        NEXT
+    NEXT
+END SUB
+
+' Pone la sugerencia con mayuscula inicial si la palabra original la tenia
+FUNCTION SugCap$ (orig$, sug$)
+    IF LEFT$(orig$, 1) >= "A" AND LEFT$(orig$, 1) <= "Z" THEN
+        SugCap$ = UCASE$(LEFT$(sug$, 1)) + MID$(sug$, 2)
+    ELSE
+        SugCap$ = sug$
+    END IF
+END FUNCTION
+
+'--------------------------------------------------------------
+'  REVISION INTERACTIVA (desde el cursor hasta el final)
+'--------------------------------------------------------------
+SUB WPSpell
+    DIM s, ln, sc, p, st, w$, lw$, line$, k$, nw$, rep$, stopIt, bad, i, sg$
+    IF SpLoaded = 0 THEN SpLoad
+    s = eSlot
+    ln = eL
+    sc = eC
+    stopIt = 0
+    bad = 0
+    DO WHILE ln <= WPLines(s) AND stopIt = 0
+        line$ = WPText$(s, ln)
+        p = sc
+        DO WHILE p <= LEN(line$) AND stopIt = 0
+            IF IsWordChar(MID$(line$, p, 1)) THEN
+                st = p
+                DO WHILE p <= LEN(line$)
+                    IF IsWordChar(MID$(line$, p, 1)) THEN
+                        p = p + 1
+                    ELSE
+                        EXIT DO
+                    END IF
+                LOOP
+                w$ = MID$(line$, st, p - st)
+                IF NeedCheck(w$) THEN
+                    lw$ = LowerCP$(w$)
+                    IF SpHas(lw$) = 0 THEN
+                        bad = bad + 1
+                        SpSuggest lw$
+                        eL = ln
+                        eC = st
+                        WPRedraw
+                        PrintAt 2, 1, LEFT$(" " + CHR$(34) + w$ + CHR$(34) + "  I:ignorar T:todas A:agregar C:corregir Esc:parar" + SPACE$(79), 79), 14, 0
+                        sg$ = "Sugerencias: "
+                        IF SugN = 0 THEN sg$ = sg$ + "(ninguna)"
+                        FOR i = 1 TO SugN
+                            sg$ = sg$ + N2S$(i) + "=" + SugCap$(w$, SugList$(i)) + "  "
+                        NEXT
+                        PrintAt 3, 1, LEFT$(sg$ + SPACE$(79), 79), 3, 0
+                        COLOR 0, 7
+                        LOCATE 4 + eL - eTop, st
+                        PRINT w$;
+                        COLOR 7, 0
+                        rep$ = ""
+                        DO
+                            k$ = UCASE$(GetKey$)
+                            IF k$ = "I" OR k$ = "T" OR k$ = "A" OR k$ = "C" OR k$ = CHR$(27) THEN EXIT DO
+                            IF k$ >= "1" AND k$ <= "5" THEN
+                                IF VAL(k$) <= SugN THEN EXIT DO
+                            END IF
+                        LOOP
+                        SELECT CASE k$
+                            CASE CHR$(27)
+                                stopIt = -1
+                            CASE "T"
+                                SpAdd lw$
+                            CASE "A"
+                                SpAdd lw$
+                                SpAppendUser lw$
+                            CASE "C"
+                                nw$ = PromptLine$("Corregir por:", w$)
+                                IF NOT Cancelled AND nw$ <> "" THEN rep$ = nw$
+                            CASE "1" TO "5"
+                                rep$ = SugCap$(w$, SugList$(VAL(k$)))
+                        END SELECT
+                        IF rep$ <> "" THEN
+                            IF LEN(line$) - LEN(w$) + LEN(rep$) > WPMAXLEN THEN
+                                StatusMsg$ = "La correccion no cabe en la linea"
+                            ELSE
+                                line$ = LEFT$(line$, st - 1) + rep$ + MID$(line$, p)
+                                WPText$(s, ln) = line$
+                                Desk(eIdx).Modificado = -1
+                                p = st + LEN(rep$)
+                            END IF
+                        END IF
+                    END IF
+                END IF
+            ELSE
+                p = p + 1
+            END IF
+        LOOP
+        ln = ln + 1
+        sc = 1
+    LOOP
+    IF StatusMsg$ = "" THEN
+        IF stopIt THEN
+            StatusMsg$ = "Revision interrumpida"
+        ELSEIF bad = 0 THEN
+            StatusMsg$ = "No se encontraron palabras desconocidas"
+        ELSE
+            StatusMsg$ = "Revision terminada (" + N2S$(bad) + " palabras desconocidas)"
+        END IF
+    END IF
+END SUB

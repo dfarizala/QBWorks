@@ -1,0 +1,1060 @@
+'==============================================================
+' DB.BM - Base de datos
+' Hasta MAXCAT categorias y MAXREC registros por base.
+' Datos: DBData$(casilla, registro, categoria).
+' Dos vistas: tabla (varios registros) y ficha (un registro).
+' DBView() lista los registros visibles (todos o los que cumplen
+' el filtro activo); dPos es la posicion dentro de esa lista.
+'==============================================================
+
+SUB InitDB (sl)
+    DIM r, c
+    FOR r = 1 TO MAXREC
+        FOR c = 1 TO MAXCAT
+            DBData$(sl, r, c) = ""
+        NEXT
+    NEXT
+    FOR c = 1 TO MAXCAT
+        DBCatName$(sl, c) = ""
+        DBCatW(sl, c) = 12
+    NEXT
+    DBCatCount(sl) = 0
+    DBRecCount(sl) = 0
+END SUB
+
+' Ancho de columna sugerido para un nombre de categoria
+FUNCTION DefaultW (nm$)
+    DIM w
+    w = LEN(nm$) + 2
+    IF w < 10 THEN w = 10
+    IF w > 20 THEN w = 20
+    DefaultW = w
+END FUNCTION
+
+' Pide un texto en una pantalla propia. Devuelve "" si se cancela.
+FUNCTION DBAskText$ (p$, init$, maxLen)
+    DIM r$
+    CLS
+    TitleBar "Categorias"
+    PrintAt 4, 3, p$, 15, 0
+    HelpBar "Enter: aceptar   Esc: cancelar"
+    r$ = ReadLine$(6, 3, maxLen, init$)
+    IF Cancelled THEN r$ = ""
+    DBAskText$ = LTRIM$(RTRIM$(r$))
+END FUNCTION
+
+' Define las categorias de una base nueva (hasta MAXCAT)
+SUB DBDefineCats (s)
+    DIM i, nm$
+    DO
+        IF DBCatCount(s) >= MAXCAT THEN EXIT DO
+        CLS
+        TitleBar "Definir categorias"
+        PrintAt 3, 3, "Categorias definidas:", 15, 0
+        FOR i = 1 TO DBCatCount(s)
+            PrintAt 4 + i, 5, N2S$(i) + ". " + DBCatName$(s, i), 7, 0
+        NEXT
+        PrintAt 18, 3, "Nombre de la categoria " + N2S$(DBCatCount(s) + 1) + " (Enter vacio = terminar):", 7, 0
+        HelpBar "Escriba el nombre y Enter   Esc: terminar"
+        nm$ = ReadLine$(19, 3, 20, "")
+        IF Cancelled THEN EXIT DO
+        nm$ = LTRIM$(RTRIM$(nm$))
+        IF nm$ = "" THEN
+            IF DBCatCount(s) = 0 THEN
+                Msg "Defina al menos una categoria"
+            ELSE
+                EXIT DO
+            END IF
+        ELSE
+            DBCatCount(s) = DBCatCount(s) + 1
+            DBCatName$(s, DBCatCount(s)) = nm$
+            DBCatW(s, DBCatCount(s)) = DefaultW(nm$)
+        END IF
+    LOOP
+END SUB
+
+'--------------------------------------------------------------
+'  COMPARACION, FILTRO Y ORDEN
+'--------------------------------------------------------------
+' Compara dos valores (ya en mayusculas): numerico si ambos son
+' numeros, si no por texto. Devuelve -1, 0 o 1.
+FUNCTION DBCompareVals (a$, b$)
+    DIM x#, y#
+    IF IsNumber(a$) AND IsNumber(b$) THEN
+        x# = VAL(a$)
+        y# = VAL(b$)
+        IF x# < y# THEN
+            DBCompareVals = -1
+        ELSEIF x# > y# THEN
+            DBCompareVals = 1
+        ELSE
+            DBCompareVals = 0
+        END IF
+    ELSE
+        IF a$ < b$ THEN
+            DBCompareVals = -1
+        ELSEIF a$ > b$ THEN
+            DBCompareVals = 1
+        ELSE
+            DBCompareVals = 0
+        END IF
+    END IF
+END FUNCTION
+
+' -1 si el registro r cumple el filtro activo
+FUNCTION DBMatch (s, r)
+    DIM a$, b$
+    a$ = UCASE$(DBData$(s, r, dFCat))
+    b$ = UCASE$(dFVal$)
+    DBMatch = 0
+    SELECT CASE dFOp
+        CASE 1
+            IF INSTR(a$, b$) > 0 THEN DBMatch = -1
+        CASE 2
+            IF a$ = b$ THEN DBMatch = -1
+        CASE 3
+            IF LEFT$(a$, LEN(b$)) = b$ THEN DBMatch = -1
+        CASE 4
+            IF DBCompareVals(a$, b$) > 0 THEN DBMatch = -1
+        CASE 5
+            IF DBCompareVals(a$, b$) < 0 THEN DBMatch = -1
+        CASE 6
+            IF a$ <> b$ THEN DBMatch = -1
+    END SELECT
+END FUNCTION
+
+' Reconstruye la lista de registros visibles
+SUB DBBuildView
+    DIM r, s
+    s = dSlot
+    dViewN = 0
+    FOR r = 1 TO DBRecCount(s)
+        IF dFOn = 0 THEN
+            dViewN = dViewN + 1
+            DBView(dViewN) = r
+        ELSEIF DBMatch(s, r) THEN
+            dViewN = dViewN + 1
+            DBView(dViewN) = r
+        END IF
+    NEXT
+    IF dPos > dViewN THEN dPos = dViewN
+    IF dViewN > 0 AND dPos < 1 THEN dPos = 1
+    IF dViewN = 0 THEN dPos = 0
+END SUB
+
+' Ordena todos los registros por la categoria cat (desc = -1: descendente)
+SUB DBSort (cat, desc)
+    DIM s, n, i, j, kv, c, cmpv
+    s = dSlot
+    n = DBRecCount(s)
+    IF n < 2 THEN EXIT SUB
+    FOR i = 1 TO n
+        DBIdx(i) = i
+    NEXT
+    FOR i = 2 TO n
+        kv = DBIdx(i)
+        j = i - 1
+        DO WHILE j >= 1
+            cmpv = DBCompareVals(UCASE$(DBData$(s, DBIdx(j), cat)), UCASE$(DBData$(s, kv, cat)))
+            IF (desc = 0 AND cmpv > 0) OR (desc <> 0 AND cmpv < 0) THEN
+                DBIdx(j + 1) = DBIdx(j)
+                j = j - 1
+            ELSE
+                EXIT DO
+            END IF
+        LOOP
+        DBIdx(j + 1) = kv
+    NEXT
+    FOR i = 1 TO n
+        FOR c = 1 TO DBCatCount(s)
+            DBTmp$(i, c) = DBData$(s, DBIdx(i), c)
+        NEXT
+    NEXT
+    FOR i = 1 TO n
+        FOR c = 1 TO DBCatCount(s)
+            DBData$(s, i, c) = DBTmp$(i, c)
+        NEXT
+    NEXT
+END SUB
+
+'--------------------------------------------------------------
+'  PANTALLA
+'--------------------------------------------------------------
+FUNCTION OpName$ (op)
+    SELECT CASE op
+        CASE 1: OpName$ = "contiene"
+        CASE 2: OpName$ = "="
+        CASE 3: OpName$ = "empieza con"
+        CASE 4: OpName$ = ">"
+        CASE 5: OpName$ = "<"
+        CASE 6: OpName$ = "<>"
+        CASE ELSE: OpName$ = "?"
+    END SELECT
+END FUNCTION
+
+SUB DBInfoLine
+    DIM s, st$, rt$
+    s = dSlot
+    IF dViewN = 0 THEN
+        st$ = " Sin registros"
+    ELSE
+        st$ = " Registro " + N2S$(dPos) + " de " + N2S$(dViewN)
+    END IF
+    IF dFOn THEN st$ = st$ + " (de " + N2S$(DBRecCount(s)) + ")"
+    st$ = st$ + "   Categoria: " + DBCatName$(s, dCat)
+    IF StatusMsg$ <> "" THEN
+        rt$ = StatusMsg$
+        StatusMsg$ = ""
+    ELSEIF dFOn THEN
+        rt$ = "Filtro: " + DBCatName$(s, dFCat) + " " + OpName$(dFOp) + " " + dFVal$
+    ELSE
+        rt$ = ""
+    END IF
+    PrintAt 2, 1, LEFT$(st$ + SPACE$(46), 46) + LEFT$(rt$ + SPACE$(33), 33), 14, 0
+END SUB
+
+SUB DBRedrawTable
+    DIM s, n, c, w, x, i, pp, rec, last, t$
+    s = dSlot
+    n = DBCatCount(s)
+    IF dCat < 1 THEN dCat = 1
+    IF dCat > n THEN dCat = n
+    IF dLeft < 1 THEN dLeft = 1
+    IF dCat < dLeft THEN dLeft = dCat
+    DO
+        x = 5
+        last = dLeft - 1
+        FOR c = dLeft TO n
+            w = DBCatW(s, c)
+            IF c > dLeft AND x + w - 1 > 79 THEN EXIT FOR
+            last = c
+            x = x + w + 1
+        NEXT
+        IF dCat > last AND dLeft < dCat THEN
+            dLeft = dLeft + 1
+        ELSE
+            EXIT DO
+        END IF
+    LOOP
+    IF dPos > dViewN THEN dPos = dViewN
+    IF dViewN > 0 AND dPos < 1 THEN dPos = 1
+    IF dPos < dTop THEN dTop = dPos
+    IF dPos > dTop + DBROWS - 1 THEN dTop = dPos - DBROWS + 1
+    IF dTop < 1 THEN dTop = 1
+
+    ' Encabezados
+    COLOR 3, 0
+    LOCATE 3, 1
+    PRINT SPACE$(79);
+    x = 5
+    FOR c = dLeft TO last
+        w = DBCatW(s, c)
+        t$ = LEFT$(DBCatName$(s, c) + SPACE$(w), w)
+        IF c = dCat THEN COLOR 0, 3 ELSE COLOR 3, 0
+        LOCATE 3, x
+        PRINT t$;
+        x = x + w + 1
+    NEXT
+    COLOR 7, 0
+
+    ' Registros
+    FOR i = 0 TO DBROWS - 1
+        pp = dTop + i
+        IF pp >= 1 AND pp <= dViewN THEN
+            rec = DBView(pp)
+            LOCATE 4 + i, 1
+            IF pp = dPos THEN COLOR 0, 3 ELSE COLOR 3, 0
+            PRINT RIGHT$("   " + N2S$(rec), 3) + " ";
+            x = 5
+            FOR c = dLeft TO last
+                w = DBCatW(s, c)
+                t$ = LEFT$(DBData$(s, rec, c) + SPACE$(w), w)
+                IF pp = dPos AND c = dCat THEN
+                    COLOR 0, 7
+                ELSEIF pp = dPos THEN
+                    COLOR 15, 1
+                ELSE
+                    COLOR 7, 0
+                END IF
+                LOCATE 4 + i, x
+                PRINT t$;
+                COLOR 7, 0
+                PRINT " ";
+                x = x + w + 1
+            NEXT
+            IF 80 - x > 0 THEN PRINT SPACE$(80 - x);
+        ELSE
+            COLOR 7, 0
+            LOCATE 4 + i, 1
+            PRINT SPACE$(79);
+        END IF
+    NEXT
+    COLOR 7, 0
+    IF dViewN = 0 THEN PrintAt 6, 5, "No hay registros. Presione F3 para agregar uno.", 14, 0
+END SUB
+
+SUB DBRedrawRecord
+    DIM s, n, c, nw, rec, t$
+    s = dSlot
+    n = DBCatCount(s)
+    IF dPos > dViewN THEN dPos = dViewN
+    IF dViewN > 0 AND dPos < 1 THEN dPos = 1
+    IF dCat < 1 THEN dCat = 1
+    IF dCat > n THEN dCat = n
+    nw = 0
+    FOR c = 1 TO n
+        IF LEN(DBCatName$(s, c)) > nw THEN nw = LEN(DBCatName$(s, c))
+    NEXT
+    COLOR 7, 0
+    FOR c = 3 TO 24
+        LOCATE c, 1
+        PRINT SPACE$(79);
+    NEXT
+    IF dViewN = 0 THEN
+        PrintAt 6, 5, "No hay registros. Presione F3 para agregar uno.", 14, 0
+    ELSE
+        rec = DBView(dPos)
+        PrintAt 3, 3, "Ficha del registro " + N2S$(rec), 3, 0
+        FOR c = 1 TO n
+            PrintAt 4 + c, 3, LEFT$(DBCatName$(s, c) + ":" + SPACE$(nw + 2), nw + 2), 3, 0
+            t$ = LEFT$(DBData$(s, rec, c) + SPACE$(50), 50)
+            IF c = dCat THEN
+                PrintAt 4 + c, 5 + nw, t$, 0, 7
+            ELSE
+                PrintAt 4 + c, 5 + nw, t$, 15, 0
+            END IF
+        NEXT
+    END IF
+END SUB
+
+SUB DBRedraw
+    DIM st$
+    st$ = RTRIM$(Desk(dIdx).Nombre) + " (Base de datos)"
+    IF Desk(dIdx).Modificado THEN st$ = st$ + " *"
+    TitleBar st$
+    DBInfoLine
+    IF dMode = 1 THEN
+        DBRedrawTable
+    ELSE
+        DBRedrawRecord
+    END IF
+    HelpBar "F1:? F2:vista F3:nuevo F4:borrar F5:orden F6:filtro F7:inf F8:cat F9:clip ^P"
+    LOCATE , , 0
+    CursorWanted = 0
+END SUB
+
+SUB DBHelp
+    DIM k$
+    CLS
+    TitleBar "Ayuda - Base de datos"
+    PrintAt 3, 3, "MOVIMIENTO", 14, 0
+    PrintAt 4, 5, "Vista de tabla: flechas mueven por registros y categorias", 7, 0
+    PrintAt 5, 5, "Vista de ficha: arriba/abajo = categoria, izq/der o RePag/AvPag = registro", 7, 0
+    PrintAt 6, 5, "Tab: siguiente categoria    Inicio/Fin: primera/ultima categoria", 7, 0
+    PrintAt 7, 5, "Ctrl+Inicio / Ctrl+Fin: primer / ultimo registro", 7, 0
+    PrintAt 9, 3, "DATOS", 14, 0
+    PrintAt 10, 5, "Escriba para llenar el campo y Enter (pasa al campo siguiente)", 7, 0
+    PrintAt 11, 5, "Enter edita el campo actual    Supr: vaciar el campo", 7, 0
+    PrintAt 12, 5, "F3: registro nuevo   F4: borrar registro   F2: tabla / ficha", 7, 0
+    PrintAt 14, 3, "ORDEN, FILTRO, INFORMES", 14, 0
+    PrintAt 15, 5, "F5: ordenar por la categoria actual (numeros y texto)", 7, 0
+    PrintAt 16, 5, "F6: seleccionar registros con una regla / mostrar todos", 7, 0
+    PrintAt 17, 5, "F7: informe en tabla o fichas a un documento de texto,", 7, 0
+    PrintAt 18, 5, "    o exportar a .TXT o .CSV (solo los registros visibles)", 7, 0
+    PrintAt 19, 5, "F8: renombrar, agregar o borrar categorias, y ancho de columna", 7, 0
+    PrintAt 21, 3, "ARCHIVO", 14, 0
+    PrintAt 22, 5, "Ctrl+S: guardar    Esc: volver al Escritorio", 7, 0
+    PrintAt 23, 5, "F9: portapapeles (copiar y pegar registros)    Ctrl+P: imprimir", 7, 0
+    HelpBar "Presione una tecla para volver"
+    k$ = GetKey$
+END SUB
+
+'--------------------------------------------------------------
+'  EDICION
+'--------------------------------------------------------------
+' Edita el campo actual. ch$ = "" edita el valor existente;
+' si no, ch$ es la primera tecla que se escribio.
+SUB DBEditCell (ch$)
+    DIM s, rec, nm$, t$, init$
+    IF dViewN = 0 OR dPos < 1 THEN
+        StatusMsg$ = "No hay registros. Presione F3 para agregar uno"
+        EXIT SUB
+    END IF
+    s = dSlot
+    rec = DBView(dPos)
+    IF ch$ = "" THEN
+        init$ = DBData$(s, rec, dCat)
+    ELSE
+        init$ = ch$
+    END IF
+    nm$ = LEFT$(DBCatName$(s, dCat), 20)
+    PrintAt 2, 1, LEFT$(" " + nm$ + ">" + SPACE$(79), 79), 11, 0
+    t$ = ReadLine$(2, 4 + LEN(nm$), 50, init$)
+    IF Cancelled THEN EXIT SUB
+    t$ = LTRIM$(RTRIM$(t$))
+    IF t$ <> DBData$(s, rec, dCat) THEN
+        DBData$(s, rec, dCat) = t$
+        Desk(dIdx).Modificado = -1
+    END IF
+    IF dCat < DBCatCount(s) THEN
+        dCat = dCat + 1
+    ELSE
+        dCat = 1
+        IF dPos < dViewN THEN dPos = dPos + 1
+    END IF
+END SUB
+
+SUB DBClearCell
+    IF dViewN = 0 OR dPos < 1 THEN EXIT SUB
+    IF DBData$(dSlot, DBView(dPos), dCat) <> "" THEN
+        DBData$(dSlot, DBView(dPos), dCat) = ""
+        Desk(dIdx).Modificado = -1
+    END IF
+END SUB
+
+SUB DBAddRecord
+    DIM s, c
+    s = dSlot
+    IF DBRecCount(s) >= MAXREC THEN
+        StatusMsg$ = "Se alcanzo el maximo de registros"
+        EXIT SUB
+    END IF
+    DBRecCount(s) = DBRecCount(s) + 1
+    FOR c = 1 TO MAXCAT
+        DBData$(s, DBRecCount(s), c) = ""
+    NEXT
+    IF dFOn THEN
+        dFOn = 0
+        StatusMsg$ = "Filtro quitado para mostrar el registro nuevo"
+    END IF
+    DBBuildView
+    dPos = dViewN
+    dCat = 1
+    Desk(dIdx).Modificado = -1
+END SUB
+
+SUB DBDeleteRecord
+    DIM s, rec, r, c
+    IF dViewN = 0 OR dPos < 1 THEN EXIT SUB
+    s = dSlot
+    rec = DBView(dPos)
+    IF NOT Confirm("Borrar el registro " + N2S$(rec) + "?") THEN EXIT SUB
+    FOR r = rec TO DBRecCount(s) - 1
+        FOR c = 1 TO MAXCAT
+            DBData$(s, r, c) = DBData$(s, r + 1, c)
+        NEXT
+    NEXT
+    FOR c = 1 TO MAXCAT
+        DBData$(s, DBRecCount(s), c) = ""
+    NEXT
+    DBRecCount(s) = DBRecCount(s) - 1
+    DBBuildView
+    Desk(dIdx).Modificado = -1
+    StatusMsg$ = "Registro borrado"
+END SUB
+
+SUB DBSortMenu
+    DIM choice
+    CLS
+    TitleBar "Ordenar registros"
+    PrintAt 3, 3, "Ordenar por la categoria: " + DBCatName$(dSlot, dCat), 15, 0
+    MenuCount = 3
+    MenuItem$(1) = "1. Ascendente (A a Z, menor a mayor)"
+    MenuItem$(2) = "2. Descendente (Z a A, mayor a menor)"
+    MenuItem$(3) = "3. Cancelar"
+    HelpBar "Flechas: mover   Enter: elegir   Esc: cancelar"
+    choice = RunMenu(5, 5, 1)
+    IF choice = 1 OR choice = 2 THEN
+        DBSort dCat, (choice = 2)
+        dPos = 1
+        DBBuildView
+        Desk(dIdx).Modificado = -1
+        StatusMsg$ = "Ordenado por " + DBCatName$(dSlot, dCat)
+    END IF
+END SUB
+
+SUB DBFilterMenu
+    DIM choice, c, op, v$, s, i
+    s = dSlot
+    CLS
+    TitleBar "Buscar / seleccionar registros"
+    PrintAt 3, 3, "Que desea hacer?", 15, 0
+    MenuCount = 3
+    MenuItem$(1) = "1. Seleccionar registros con una regla"
+    MenuItem$(2) = "2. Mostrar todos los registros"
+    MenuItem$(3) = "3. Cancelar"
+    HelpBar "Flechas: mover   Enter: elegir   Esc: cancelar"
+    choice = RunMenu(5, 5, 1)
+    IF choice = 2 THEN
+        dFOn = 0
+        DBBuildView
+        StatusMsg$ = "Mostrando todos los registros"
+        EXIT SUB
+    END IF
+    IF choice <> 1 THEN EXIT SUB
+
+    ' categoria
+    CLS
+    TitleBar "Seleccionar registros"
+    PrintAt 3, 3, "Categoria a comparar:", 15, 0
+    MenuCount = DBCatCount(s)
+    FOR i = 1 TO MenuCount
+        MenuItem$(i) = N2S$(i) + ". " + DBCatName$(s, i)
+    NEXT
+    HelpBar "Flechas: mover   Enter: elegir   Esc: cancelar"
+    c = RunMenu(5, 5, dCat)
+    IF c = 0 THEN EXIT SUB
+
+    ' regla
+    CLS
+    TitleBar "Seleccionar registros"
+    PrintAt 3, 3, "La categoria " + DBCatName$(s, c) + " debe:", 15, 0
+    MenuCount = 6
+    MenuItem$(1) = "1. Contener el texto"
+    MenuItem$(2) = "2. Ser igual a"
+    MenuItem$(3) = "3. Empezar con"
+    MenuItem$(4) = "4. Ser mayor que"
+    MenuItem$(5) = "5. Ser menor que"
+    MenuItem$(6) = "6. Ser distinta de"
+    HelpBar "Flechas: mover   Enter: elegir   Esc: cancelar"
+    op = RunMenu(5, 5, 1)
+    IF op = 0 THEN EXIT SUB
+
+    ' valor
+    CLS
+    TitleBar "Seleccionar registros"
+    PrintAt 3, 3, DBCatName$(s, c) + " " + OpName$(op) + ":", 15, 0
+    HelpBar "Escriba el valor y Enter   Esc: cancelar"
+    v$ = ReadLine$(5, 3, 50, "")
+    IF Cancelled THEN EXIT SUB
+    v$ = LTRIM$(RTRIM$(v$))
+    IF v$ = "" THEN EXIT SUB
+    dFOn = -1
+    dFCat = c
+    dFOp = op
+    dFVal$ = v$
+    dPos = 1
+    DBBuildView
+    StatusMsg$ = N2S$(dViewN) + " registros seleccionados"
+END SUB
+
+SUB DBCatMenu
+    DIM choice, s, n, c, r, a$, v
+    s = dSlot
+    n = DBCatCount(s)
+    CLS
+    TitleBar "Categorias"
+    PrintAt 3, 3, "Categoria actual: " + DBCatName$(s, dCat), 15, 0
+    MenuCount = 5
+    MenuItem$(1) = "1. Cambiar el nombre de la categoria actual"
+    MenuItem$(2) = "2. Agregar una categoria nueva al final"
+    MenuItem$(3) = "3. Borrar la categoria actual"
+    MenuItem$(4) = "4. Cambiar el ancho de la columna actual"
+    MenuItem$(5) = "5. Volver"
+    HelpBar "Flechas: mover   Enter: elegir   Esc: cancelar"
+    choice = RunMenu(5, 5, 1)
+    SELECT CASE choice
+        CASE 1
+            a$ = DBAskText$("Nuevo nombre de la categoria:", DBCatName$(s, dCat), 20)
+            IF a$ <> "" THEN
+                DBCatName$(s, dCat) = a$
+                Desk(dIdx).Modificado = -1
+            END IF
+        CASE 2
+            IF n >= MAXCAT THEN
+                Msg "Se alcanzo el maximo de categorias"
+            ELSE
+                a$ = DBAskText$("Nombre de la categoria nueva:", "", 20)
+                IF a$ <> "" THEN
+                    n = n + 1
+                    FOR r = 1 TO MAXREC
+                        DBData$(s, r, n) = ""
+                    NEXT
+                    DBCatCount(s) = n
+                    DBCatName$(s, n) = a$
+                    DBCatW(s, n) = DefaultW(a$)
+                    Desk(dIdx).Modificado = -1
+                END IF
+            END IF
+        CASE 3
+            IF n <= 1 THEN
+                Msg "Debe quedar al menos una categoria"
+            ELSEIF Confirm("Borrar la categoria " + DBCatName$(s, dCat) + " y sus datos?") THEN
+                FOR r = 1 TO DBRecCount(s)
+                    FOR c = dCat TO n - 1
+                        DBData$(s, r, c) = DBData$(s, r, c + 1)
+                    NEXT
+                    DBData$(s, r, n) = ""
+                NEXT
+                FOR c = dCat TO n - 1
+                    DBCatName$(s, c) = DBCatName$(s, c + 1)
+                    DBCatW(s, c) = DBCatW(s, c + 1)
+                NEXT
+                DBCatName$(s, n) = ""
+                DBCatCount(s) = n - 1
+                IF dCat > n - 1 THEN dCat = n - 1
+                dFOn = 0
+                DBBuildView
+                Desk(dIdx).Modificado = -1
+            END IF
+        CASE 4
+            a$ = DBAskText$("Ancho de la columna (5-30):", N2S$(DBCatW(s, dCat)), 3)
+            IF a$ <> "" THEN
+                v = VAL(a$)
+                IF v >= 5 AND v <= 30 THEN
+                    DBCatW(s, dCat) = v
+                    Desk(dIdx).Modificado = -1
+                ELSE
+                    StatusMsg$ = "El ancho debe estar entre 5 y 30"
+                END IF
+            END IF
+    END SELECT
+END SUB
+
+'--------------------------------------------------------------
+'  INFORMES Y EXPORTACION
+'--------------------------------------------------------------
+' Envia una linea al destino: rDest 1 = documento de texto (casilla
+' rSlot), rDest 2 = archivo abierto con el numero rFF.
+SUB EmitLine (t$)
+    IF rDest = 1 THEN
+        IF rCount >= MAXLINES THEN
+            rTrunc = -1
+        ELSE
+            rCount = rCount + 1
+            IF LEN(t$) > WPMAXLEN THEN
+                WPText$(rSlot, rCount) = LEFT$(t$, WPMAXLEN)
+                rCut = -1
+            ELSE
+                WPText$(rSlot, rCount) = t$
+            END IF
+        END IF
+    ELSEIF rDest = 3 THEN
+        IF PCount < MAXLINES THEN
+            PCount = PCount + 1
+            PLine$(PCount) = t$
+        END IF
+    ELSE
+        IF ErrFlag = 0 THEN PRINT #rFF, ToLatin1$(t$)
+        rCount = rCount + 1
+    END IF
+END SUB
+
+FUNCTION CsvField$ (v$)
+    DIM o$, i, ch$
+    IF INSTR(v$, ",") = 0 AND INSTR(v$, CHR$(34)) = 0 AND INSTR(v$, ";") = 0 THEN
+        CsvField$ = v$
+        EXIT FUNCTION
+    END IF
+    o$ = CHR$(34)
+    FOR i = 1 TO LEN(v$)
+        ch$ = MID$(v$, i, 1)
+        IF ch$ = CHR$(34) THEN
+            o$ = o$ + CHR$(34) + CHR$(34)
+        ELSE
+            o$ = o$ + ch$
+        END IF
+    NEXT
+    CsvField$ = o$ + CHR$(34)
+END FUNCTION
+
+' Genera el informe de los registros visibles.
+' kind: 1 = tabla, 2 = fichas, 3 = CSV
+SUB DBReportLines (kind)
+    DIM s, n, i, c, rec, ln$, nw
+    DIM w(1 TO MAXCAT)
+    s = dSlot
+    n = DBCatCount(s)
+    SELECT CASE kind
+        CASE 1
+            FOR c = 1 TO n
+                w(c) = LEN(DBCatName$(s, c))
+                FOR i = 1 TO dViewN
+                    IF LEN(DBData$(s, DBView(i), c)) > w(c) THEN w(c) = LEN(DBData$(s, DBView(i), c))
+                NEXT
+                IF w(c) > 25 THEN w(c) = 25
+                IF w(c) < 3 THEN w(c) = 3
+            NEXT
+            ln$ = ""
+            FOR c = 1 TO n
+                ln$ = ln$ + LEFT$(DBCatName$(s, c) + SPACE$(w(c)), w(c)) + "  "
+            NEXT
+            EmitLine RTRIM$(ln$)
+            ln$ = ""
+            FOR c = 1 TO n
+                ln$ = ln$ + STRING$(w(c), "-") + "  "
+            NEXT
+            EmitLine RTRIM$(ln$)
+            FOR i = 1 TO dViewN
+                rec = DBView(i)
+                ln$ = ""
+                FOR c = 1 TO n
+                    ln$ = ln$ + LEFT$(DBData$(s, rec, c) + SPACE$(w(c)), w(c)) + "  "
+                NEXT
+                EmitLine RTRIM$(ln$)
+            NEXT
+        CASE 2
+            nw = 0
+            FOR c = 1 TO n
+                IF LEN(DBCatName$(s, c)) > nw THEN nw = LEN(DBCatName$(s, c))
+            NEXT
+            FOR i = 1 TO dViewN
+                rec = DBView(i)
+                FOR c = 1 TO n
+                    EmitLine LEFT$(DBCatName$(s, c) + ":" + SPACE$(nw + 2), nw + 2) + DBData$(s, rec, c)
+                NEXT
+                EmitLine ""
+            NEXT
+        CASE 3
+            ln$ = ""
+            FOR c = 1 TO n
+                IF c > 1 THEN ln$ = ln$ + ","
+                ln$ = ln$ + CsvField$(DBCatName$(s, c))
+            NEXT
+            EmitLine ln$
+            FOR i = 1 TO dViewN
+                rec = DBView(i)
+                ln$ = ""
+                FOR c = 1 TO n
+                    IF c > 1 THEN ln$ = ln$ + ","
+                    ln$ = ln$ + CsvField$(DBData$(s, rec, c))
+                NEXT
+                EmitLine ln$
+            NEXT
+    END SELECT
+END SUB
+
+SUB DBReportMenu
+    DIM choice, nm$, bn$, n, slot, f$, m$
+    IF dViewN = 0 THEN
+        StatusMsg$ = "No hay registros para el informe"
+        EXIT SUB
+    END IF
+    CLS
+    TitleBar "Informes y exportacion"
+    PrintAt 3, 3, "Registros incluidos: " + N2S$(dViewN) + " (los que se ven ahora, en su orden)", 15, 0
+    MenuCount = 5
+    MenuItem$(1) = "1. Informe en tabla -> documento de texto"
+    MenuItem$(2) = "2. Informe en fichas -> documento de texto"
+    MenuItem$(3) = "3. Exportar a un archivo de texto (.TXT)"
+    MenuItem$(4) = "4. Exportar a CSV (.CSV)"
+    MenuItem$(5) = "5. Cancelar"
+    HelpBar "Flechas: mover   Enter: elegir   Esc: cancelar"
+    choice = RunMenu(5, 5, 1)
+    IF choice = 0 OR choice = 5 THEN EXIT SUB
+
+    IF choice = 1 OR choice = 2 THEN
+        IF DeskCount >= MAXDESK THEN
+            Msg "El Escritorio esta lleno (maximo 12 archivos)"
+            EXIT SUB
+        END IF
+        bn$ = RTRIM$(LEFT$("Informe " + RTRIM$(Desk(dIdx).Nombre), 30))
+        nm$ = bn$
+        n = 2
+        DO WHILE NameExists(nm$)
+            nm$ = RTRIM$(LEFT$(bn$, 26)) + " " + N2S$(n)
+            n = n + 1
+        LOOP
+        slot = AllocSlot
+        IF slot = 0 THEN
+            Msg "No hay espacio en el Escritorio"
+            EXIT SUB
+        END IF
+        rDest = 1
+        rSlot = slot
+        rCount = 0
+        rTrunc = 0
+        rCut = 0
+        DBReportLines choice
+        IF rCount < 1 THEN rCount = 1
+        WPLines(slot) = rCount
+        DeskCount = DeskCount + 1
+        Desk(DeskCount).Nombre = nm$
+        Desk(DeskCount).Tipo = 1
+        Desk(DeskCount).Modificado = -1
+        Desk(DeskCount).EnDisco = 0
+        Desk(DeskCount).Slot = slot
+        m$ = "Informe creado: " + nm$
+        IF rTrunc THEN
+            m$ = m$ + "  (documento lleno)"
+        ELSEIF rCut THEN
+            m$ = m$ + "  (lineas recortadas)"
+        END IF
+        Msg m$
+    ELSE
+        IF choice = 3 THEN
+            f$ = RTRIM$(Desk(dIdx).Nombre) + ".TXT"
+        ELSE
+            f$ = RTRIM$(Desk(dIdx).Nombre) + ".CSV"
+        END IF
+        IF _FILEEXISTS(f$) THEN
+            IF NOT Confirm("Ya existe " + f$ + ". Reemplazarlo?") THEN EXIT SUB
+        END IF
+        rFF = FREEFILE
+        ErrFlag = 0
+        ON ERROR GOTO FileErr
+        OPEN f$ FOR OUTPUT AS #rFF
+        IF ErrFlag = 0 THEN
+            rDest = 2
+            rCount = 0
+            IF choice = 3 THEN
+                DBReportLines 1
+            ELSE
+                DBReportLines 3
+            END IF
+        END IF
+        CLOSE #rFF
+        ON ERROR GOTO 0
+        IF ErrFlag THEN
+            Msg "No se pudo escribir " + f$
+        ELSE
+            Msg f$ + " guardado (" + N2S$(rCount) + " lineas)"
+        END IF
+    END IF
+END SUB
+
+'--------------------------------------------------------------
+'  EDITOR PRINCIPAL DE LA BASE DE DATOS
+'--------------------------------------------------------------
+SUB DBEdit (idx)
+    DIM k$, s, n
+    dIdx = idx
+    dSlot = Desk(idx).Slot
+    s = dSlot
+    IF DBCatCount(s) = 0 THEN
+        DBDefineCats s
+        IF DBCatCount(s) = 0 THEN EXIT SUB
+        Desk(idx).Modificado = -1
+    END IF
+    dMode = 1
+    dPos = 1
+    dCat = 1
+    dTop = 1
+    dLeft = 1
+    dFOn = 0
+    dFCat = 1
+    dFOp = 1
+    dFVal$ = ""
+    StatusMsg$ = ""
+    DBBuildView
+    DO
+        DBRedraw
+        n = DBCatCount(s)
+        k$ = GetKey$
+        SELECT CASE k$
+            CASE CHR$(27)
+                EXIT DO
+            CASE CHR$(0) + "H"
+                IF dMode = 1 THEN
+                    IF dPos > 1 THEN dPos = dPos - 1
+                ELSE
+                    IF dCat > 1 THEN dCat = dCat - 1
+                END IF
+            CASE CHR$(0) + "P"
+                IF dMode = 1 THEN
+                    IF dPos < dViewN THEN dPos = dPos + 1
+                ELSE
+                    IF dCat < n THEN dCat = dCat + 1
+                END IF
+            CASE CHR$(0) + "K"
+                IF dMode = 1 THEN
+                    IF dCat > 1 THEN dCat = dCat - 1
+                ELSE
+                    IF dPos > 1 THEN dPos = dPos - 1
+                END IF
+            CASE CHR$(0) + "M"
+                IF dMode = 1 THEN
+                    IF dCat < n THEN dCat = dCat + 1
+                ELSE
+                    IF dPos < dViewN THEN dPos = dPos + 1
+                END IF
+            CASE CHR$(9)
+                IF dCat < n THEN dCat = dCat + 1
+            CASE CHR$(0) + "I"
+                IF dViewN > 0 THEN
+                    IF dMode = 1 THEN
+                        dPos = dPos - DBROWS
+                    ELSE
+                        dPos = dPos - 1
+                    END IF
+                    IF dPos < 1 THEN dPos = 1
+                END IF
+            CASE CHR$(0) + "Q"
+                IF dViewN > 0 THEN
+                    IF dMode = 1 THEN
+                        dPos = dPos + DBROWS
+                    ELSE
+                        dPos = dPos + 1
+                    END IF
+                    IF dPos > dViewN THEN dPos = dViewN
+                END IF
+            CASE CHR$(0) + "G"
+                dCat = 1
+            CASE CHR$(0) + "O"
+                dCat = n
+            CASE CHR$(0) + "w"
+                IF dViewN > 0 THEN dPos = 1
+                dCat = 1
+            CASE CHR$(0) + "u"
+                IF dViewN > 0 THEN dPos = dViewN
+            CASE CHR$(13)
+                DBEditCell ""
+            CASE CHR$(0) + "S"
+                DBClearCell
+            CASE CHR$(19)
+                IF SaveOne(idx) THEN
+                    StatusMsg$ = "Archivo guardado"
+                ELSE
+                    StatusMsg$ = "No se guardo el archivo"
+                END IF
+            CASE CHR$(0) + "<"
+                IF dMode = 1 THEN
+                    dMode = 2
+                ELSE
+                    dMode = 1
+                END IF
+            CASE CHR$(0) + "="
+                DBAddRecord
+            CASE CHR$(0) + ">"
+                DBDeleteRecord
+            CASE CHR$(0) + "?"
+                DBSortMenu
+            CASE CHR$(0) + "@"
+                DBFilterMenu
+            CASE CHR$(0) + "A"
+                DBReportMenu
+            CASE CHR$(0) + "B"
+                DBCatMenu
+            CASE CHR$(0) + "C"
+                DBClipMenu
+            CASE CHR$(16)
+                PrintDoc idx
+            CASE CHR$(0) + ";"
+                DBHelp
+            CASE ELSE
+                IF LEN(k$) = 1 THEN
+                    IF ASC(k$) >= 32 AND ASC(k$) <> 127 THEN DBEditCell k$
+                END IF
+        END SELECT
+    LOOP
+    LOCATE , , 0
+    CursorWanted = 0
+END SUB
+
+'--------------------------------------------------------------
+'  ETAPA 5: PORTAPAPELES COMUN
+'--------------------------------------------------------------
+SUB DBClipMenu
+    DIM choice, s, n, i, c, k, rec
+    s = dSlot
+    n = DBCatCount(s)
+    CLS
+    TitleBar "Portapapeles"
+    PrintAt 3, 3, "Portapapeles comun (texto, hoja de calculo y base de datos)", 15, 0
+    MenuCount = 5
+    MenuItem$(1) = "1. Copiar el registro actual"
+    MenuItem$(2) = "2. Copiar los registros visibles"
+    MenuItem$(3) = "3. Copiar los visibles con los nombres de categorias"
+    MenuItem$(4) = "4. Pegar como registros nuevos (al final)"
+    MenuItem$(5) = "5. Cancelar"
+    HelpBar "Flechas: mover   Enter: elegir   Esc: cancelar"
+    choice = RunMenu(5, 5, 1)
+    SELECT CASE choice
+        CASE 1
+            IF dViewN = 0 OR dPos < 1 THEN
+                StatusMsg$ = "No hay registros para copiar"
+            ELSE
+                rec = DBView(dPos)
+                FOR c = 1 TO n
+                    GClip$(1, c) = DBData$(s, rec, c)
+                NEXT
+                GKind = 3
+                GRows = 1
+                GCols = n
+                StatusMsg$ = "Registro copiado"
+            END IF
+        CASE 2, 3
+            IF dViewN = 0 THEN
+                StatusMsg$ = "No hay registros para copiar"
+            ELSE
+                k = 0
+                IF choice = 3 THEN
+                    k = 1
+                    FOR c = 1 TO n
+                        GClip$(1, c) = DBCatName$(s, c)
+                    NEXT
+                END IF
+                FOR i = 1 TO dViewN
+                    k = k + 1
+                    FOR c = 1 TO n
+                        GClip$(k, c) = DBData$(s, DBView(i), c)
+                    NEXT
+                NEXT
+                GKind = 3
+                GRows = k
+                GCols = n
+                StatusMsg$ = N2S$(dViewN) + " registros copiados"
+            END IF
+        CASE 4
+            DBPasteRecords
+    END SELECT
+END SUB
+
+' Agrega al final los registros del portapapeles comun. Las columnas
+' se asignan a las categorias por posicion.
+SUB DBPasteRecords
+    DIM s, n, i, j, rowN, nr, added, nonEmpty, firstPos
+    DIM rv$(1 TO MAXCOLS)
+    s = dSlot
+    n = DBCatCount(s)
+    IF GKind = 0 OR GRows < 1 THEN
+        StatusMsg$ = "El portapapeles esta vacio"
+        EXIT SUB
+    END IF
+    added = 0
+    FOR i = 1 TO GRows
+        IF GKind = 1 THEN
+            SplitCells GClip$(i, 1)
+            rowN = SplitN
+            FOR j = 1 TO rowN
+                rv$(j) = SplitCell$(j)
+            NEXT
+        ELSE
+            rowN = GCols
+            FOR j = 1 TO rowN
+                rv$(j) = GClip$(i, j)
+            NEXT
+        END IF
+        nonEmpty = 0
+        FOR j = 1 TO rowN
+            IF LTRIM$(RTRIM$(rv$(j))) <> "" THEN nonEmpty = -1
+        NEXT
+        IF nonEmpty THEN
+            IF DBRecCount(s) >= MAXREC THEN
+                StatusMsg$ = "Se alcanzo el maximo de registros"
+                EXIT FOR
+            END IF
+            DBRecCount(s) = DBRecCount(s) + 1
+            nr = DBRecCount(s)
+            FOR j = 1 TO MAXCAT
+                DBData$(s, nr, j) = ""
+            NEXT
+            FOR j = 1 TO n
+                IF j <= rowN THEN DBData$(s, nr, j) = LEFT$(LTRIM$(RTRIM$(rv$(j))), 50)
+            NEXT
+            added = added + 1
+        END IF
+    NEXT
+    IF added = 0 THEN
+        IF StatusMsg$ = "" THEN StatusMsg$ = "No habia datos para pegar"
+        EXIT SUB
+    END IF
+    dFOn = 0
+    DBBuildView
+    firstPos = dViewN - added + 1
+    IF firstPos < 1 THEN firstPos = 1
+    dPos = firstPos
+    dCat = 1
+    Desk(dIdx).Modificado = -1
+    StatusMsg$ = N2S$(added) + " registros agregados"
+END SUB

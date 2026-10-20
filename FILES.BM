@@ -1,0 +1,353 @@
+'==============================================================
+' FILES.BM - Archivos en disco (formato .QBW)
+' Primera linea: "QBWORKS 1 WP" (texto), "QBWORKS 1 SS" (hoja) o
+' "QBWORKS 1 DB" (base de datos).
+'  WP: una linea por cada linea del documento.
+'  SS: "FMT ancho decimales" y luego "C fila columna contenido"
+'      por cada celda que no esta vacia.
+'  DB: "INFO ncategorias nregistros", "CAT n ancho nombre" y
+'      "V registro categoria valor" por cada valor no vacio.
+' Los errores de archivo los atrapa FileErr (en QBWORKS.BAS),
+' que solo pone ErrFlag = -1.
+'==============================================================
+
+' Llena FList$(1..n) con los nombres (sin extension) de los
+' archivos .QBW de la carpeta actual. Devuelve n.
+FUNCTION ListFiles
+    DIM ff, l$, n, cmd$
+    n = 0
+    IF INSTR(_OS$, "WIN") THEN
+        cmd$ = "cmd /c dir /b *.QBW > QBWLIST.TMP"
+    ELSE
+        cmd$ = "ls -1 *.QBW > QBWLIST.TMP 2> /dev/null"
+    END IF
+    IF _FILEEXISTS("QBWLIST.TMP") THEN KILL "QBWLIST.TMP"
+    SHELL _HIDE cmd$
+    IF _FILEEXISTS("QBWLIST.TMP") THEN
+        ff = FREEFILE
+        OPEN "QBWLIST.TMP" FOR INPUT AS #ff
+        DO WHILE NOT EOF(ff) AND n < 100
+            LINE INPUT #ff, l$
+            l$ = LTRIM$(RTRIM$(l$))
+            IF UCASE$(RIGHT$(l$, 4)) = ".QBW" AND LEN(l$) - 4 <= 30 THEN
+                n = n + 1
+                FList$(n) = LEFT$(l$, LEN(l$) - 4)
+            END IF
+        LOOP
+        CLOSE #ff
+        KILL "QBWLIST.TMP"
+    END IF
+    ListFiles = n
+END FUNCTION
+
+' Lista con desplazamiento; devuelve el nombre elegido o "" si Esc
+FUNCTION PickFile$ (n)
+    DIM sel, topI, k$, i, rows
+    rows = 15
+    sel = 1
+    topI = 1
+    DO
+        CLS
+        TitleBar "Cargar un archivo del disco"
+        PrintAt 3, 3, "Archivos .QBW en la carpeta actual:", 15, 0
+        PrintAt 4, 3, LEFT$(_CWD$, 74), 7, 0
+        FOR i = 0 TO rows - 1
+            IF topI + i <= n THEN
+                IF topI + i = sel THEN COLOR 0, 7 ELSE COLOR 7, 0
+                LOCATE 6 + i, 5
+                PRINT " " + LEFT$(FList$(topI + i) + SPACE$(30), 30) + " ";
+            END IF
+        NEXT
+        COLOR 7, 0
+        HelpBar "Flechas/RePag/AvPag: mover   Enter: cargar   Esc: cancelar"
+        k$ = GetKey$
+        SELECT CASE k$
+            CASE CHR$(0) + "H"
+                sel = sel - 1
+                IF sel < 1 THEN sel = n
+            CASE CHR$(0) + "P"
+                sel = sel + 1
+                IF sel > n THEN sel = 1
+            CASE CHR$(0) + "I"
+                sel = sel - rows
+                IF sel < 1 THEN sel = 1
+            CASE CHR$(0) + "Q"
+                sel = sel + rows
+                IF sel > n THEN sel = n
+            CASE CHR$(13)
+                PickFile$ = FList$(sel)
+                EXIT FUNCTION
+            CASE CHR$(27)
+                PickFile$ = ""
+                EXIT FUNCTION
+        END SELECT
+        IF sel < topI THEN topI = sel
+        IF sel > topI + rows - 1 THEN topI = sel - rows + 1
+    LOOP
+END FUNCTION
+
+' Lee NOMBRE.QBW en la casilla slot. Si sale bien, deja el tipo del
+' archivo en LoadKind (1 = texto, 2 = hoja, 3 = base de datos).
+' Devuelve: 1 = ok, 2 = tipo desconocido, 3 = formato invalido,
+'           0 = error de lectura
+FUNCTION LoadDoc (n$, slot)
+    DIM ff, h$, l$, cnt, res, kind, p1, p2, rr, cc, rest$, rest2$, v, dd
+    cnt = 0
+    res = 0
+    kind = 0
+    ff = FREEFILE
+    ErrFlag = 0
+    ON ERROR GOTO FileErr
+    OPEN n$ + ".QBW" FOR INPUT AS #ff
+    IF ErrFlag = 0 THEN
+        LINE INPUT #ff, h$
+        IF ErrFlag = 0 THEN
+            h$ = RTRIM$(h$)
+            IF h$ = "QBWORKS 1 WP" THEN
+                kind = 1
+            ELSEIF h$ = "QBWORKS 1 SS" THEN
+                kind = 2
+            ELSEIF h$ = "QBWORKS 1 DB" THEN
+                kind = 3
+            ELSEIF LEFT$(h$, 10) = "QBWORKS 1 " THEN
+                res = 2
+            ELSE
+                res = 3
+            END IF
+        END IF
+    END IF
+
+    IF kind = 1 THEN
+        ' ---- documento de texto ----
+        DO WHILE NOT EOF(ff) AND ErrFlag = 0
+            LINE INPUT #ff, l$
+            IF ErrFlag = 0 THEN
+                DO
+                    IF cnt >= MAXLINES THEN EXIT DO
+                    IF LEN(l$) > WPMAXLEN THEN
+                        cnt = cnt + 1
+                        WPText$(slot, cnt) = LEFT$(l$, WPMAXLEN)
+                        l$ = MID$(l$, WPMAXLEN + 1)
+                    ELSE
+                        cnt = cnt + 1
+                        WPText$(slot, cnt) = l$
+                        EXIT DO
+                    END IF
+                LOOP
+            END IF
+            IF cnt >= MAXLINES THEN EXIT DO
+        LOOP
+        IF ErrFlag = 0 THEN
+            IF cnt = 0 THEN
+                cnt = 1
+                WPText$(slot, 1) = ""
+            END IF
+            WPLines(slot) = cnt
+            WPCurL(slot) = 1
+            WPCurC(slot) = 1
+            WPTop(slot) = 1
+            res = 1
+        END IF
+    ELSEIF kind = 2 THEN
+        ' ---- hoja de calculo ----
+        DO WHILE NOT EOF(ff) AND ErrFlag = 0
+            LINE INPUT #ff, l$
+            IF ErrFlag = 0 THEN
+                IF LEFT$(l$, 4) = "FMT " THEN
+                    rest$ = MID$(l$, 5)
+                    p1 = INSTR(rest$, " ")
+                    IF p1 > 0 THEN
+                        v = VAL(LEFT$(rest$, p1 - 1))
+                        dd = VAL(MID$(rest$, p1 + 1))
+                        IF v >= 5 AND v <= 20 THEN SSColW(slot) = v
+                        IF dd >= -1 AND dd <= 8 THEN SSDec(slot) = dd
+                    END IF
+                ELSEIF LEFT$(l$, 2) = "C " THEN
+                    rest$ = MID$(l$, 3)
+                    p1 = INSTR(rest$, " ")
+                    IF p1 > 0 THEN
+                        rr = VAL(LEFT$(rest$, p1 - 1))
+                        rest2$ = MID$(rest$, p1 + 1)
+                        p2 = INSTR(rest2$, " ")
+                        IF p2 > 0 THEN
+                            cc = VAL(LEFT$(rest2$, p2 - 1))
+                            IF rr >= 1 AND rr <= MAXROWS AND cc >= 1 AND cc <= MAXCOLS THEN
+                                SSRaw$(slot, rr, cc) = MID$(rest2$, p2 + 1)
+                            END IF
+                        END IF
+                    END IF
+                END IF
+            END IF
+        LOOP
+        IF ErrFlag = 0 THEN res = 1
+    ELSEIF kind = 3 THEN
+        ' ---- base de datos ----
+        DO WHILE NOT EOF(ff) AND ErrFlag = 0
+            LINE INPUT #ff, l$
+            IF ErrFlag = 0 THEN
+                IF LEFT$(l$, 5) = "INFO " THEN
+                    rest$ = MID$(l$, 6)
+                    p1 = INSTR(rest$, " ")
+                    IF p1 > 0 THEN
+                        v = VAL(LEFT$(rest$, p1 - 1))
+                        dd = VAL(MID$(rest$, p1 + 1))
+                        IF v >= 0 AND v <= MAXCAT THEN DBCatCount(slot) = v
+                        IF dd >= 0 AND dd <= MAXREC THEN DBRecCount(slot) = dd
+                    END IF
+                ELSEIF LEFT$(l$, 4) = "CAT " THEN
+                    rest$ = MID$(l$, 5)
+                    p1 = INSTR(rest$, " ")
+                    IF p1 > 0 THEN
+                        rr = VAL(LEFT$(rest$, p1 - 1))
+                        rest2$ = MID$(rest$, p1 + 1)
+                        p2 = INSTR(rest2$, " ")
+                        IF p2 > 0 THEN
+                            cc = VAL(LEFT$(rest2$, p2 - 1))
+                            IF rr >= 1 AND rr <= MAXCAT THEN
+                                DBCatName$(slot, rr) = MID$(rest2$, p2 + 1)
+                                IF cc >= 5 AND cc <= 30 THEN DBCatW(slot, rr) = cc
+                            END IF
+                        END IF
+                    END IF
+                ELSEIF LEFT$(l$, 2) = "V " THEN
+                    rest$ = MID$(l$, 3)
+                    p1 = INSTR(rest$, " ")
+                    IF p1 > 0 THEN
+                        rr = VAL(LEFT$(rest$, p1 - 1))
+                        rest2$ = MID$(rest$, p1 + 1)
+                        p2 = INSTR(rest2$, " ")
+                        IF p2 > 0 THEN
+                            cc = VAL(LEFT$(rest2$, p2 - 1))
+                            IF rr >= 1 AND rr <= MAXREC AND cc >= 1 AND cc <= MAXCAT THEN
+                                DBData$(slot, rr, cc) = MID$(rest2$, p2 + 1)
+                            END IF
+                        END IF
+                    END IF
+                END IF
+            END IF
+        LOOP
+        IF ErrFlag = 0 THEN res = 1
+    END IF
+
+    CLOSE #ff
+    ON ERROR GOTO 0
+    IF res = 1 THEN LoadKind = kind
+    LoadDoc = res
+END FUNCTION
+
+' Escribe el archivo del Escritorio idx. Devuelve -1 si salio bien.
+FUNCTION WriteDoc (idx)
+    DIM ff, i, s, f$, r, c
+    s = Desk(idx).Slot
+    f$ = RTRIM$(Desk(idx).Nombre) + ".QBW"
+    ff = FREEFILE
+    ErrFlag = 0
+    ON ERROR GOTO FileErr
+    OPEN f$ FOR OUTPUT AS #ff
+    IF ErrFlag = 0 THEN
+        IF Desk(idx).Tipo = 2 THEN
+            PRINT #ff, "QBWORKS 1 SS"
+            PRINT #ff, "FMT " + N2S$(SSColW(s)) + " " + N2S$(SSDec(s))
+            FOR r = 1 TO MAXROWS
+                FOR c = 1 TO MAXCOLS
+                    IF SSRaw$(s, r, c) <> "" AND ErrFlag = 0 THEN
+                        PRINT #ff, "C " + N2S$(r) + " " + N2S$(c) + " " + SSRaw$(s, r, c)
+                    END IF
+                NEXT
+            NEXT
+        ELSEIF Desk(idx).Tipo = 3 THEN
+            PRINT #ff, "QBWORKS 1 DB"
+            PRINT #ff, "INFO " + N2S$(DBCatCount(s)) + " " + N2S$(DBRecCount(s))
+            FOR c = 1 TO DBCatCount(s)
+                IF ErrFlag = 0 THEN PRINT #ff, "CAT " + N2S$(c) + " " + N2S$(DBCatW(s, c)) + " " + DBCatName$(s, c)
+            NEXT
+            FOR r = 1 TO DBRecCount(s)
+                FOR c = 1 TO DBCatCount(s)
+                    IF DBData$(s, r, c) <> "" AND ErrFlag = 0 THEN
+                        PRINT #ff, "V " + N2S$(r) + " " + N2S$(c) + " " + DBData$(s, r, c)
+                    END IF
+                NEXT
+            NEXT
+        ELSE
+            PRINT #ff, "QBWORKS 1 WP"
+            FOR i = 1 TO WPLines(s)
+                IF ErrFlag = 0 THEN PRINT #ff, WPText$(s, i)
+            NEXT
+        END IF
+    END IF
+    CLOSE #ff
+    ON ERROR GOTO 0
+    IF ErrFlag = 0 THEN
+        WriteDoc = -1
+    ELSE
+        WriteDoc = 0
+    END IF
+END FUNCTION
+
+' Guarda un archivo del Escritorio (pide confirmacion si va a
+' reemplazar un archivo existente que no es el suyo).
+' Devuelve -1 si se guardo.
+FUNCTION SaveOne (idx)
+    DIM f$
+    SaveOne = 0
+    IF Desk(idx).Tipo < 1 OR Desk(idx).Tipo > 3 THEN EXIT FUNCTION
+    f$ = RTRIM$(Desk(idx).Nombre) + ".QBW"
+    IF NOT Desk(idx).EnDisco THEN
+        IF _FILEEXISTS(f$) THEN
+            IF NOT Confirm("Ya existe " + f$ + " en disco. Reemplazarlo?") THEN EXIT FUNCTION
+        END IF
+    END IF
+    IF WriteDoc(idx) THEN
+        Desk(idx).Modificado = 0
+        Desk(idx).EnDisco = -1
+        SaveOne = -1
+    ELSE
+        Msg "No se pudo guardar " + f$
+    END IF
+END FUNCTION
+
+' Carga un archivo .QBW al Escritorio y lo abre
+SUB LoadFromDisk
+    DIM n, nm$, slot, res
+    IF DeskCount >= MAXDESK THEN
+        Msg "El Escritorio esta lleno (maximo 12 archivos)"
+        EXIT SUB
+    END IF
+    n = ListFiles
+    IF n = 0 THEN
+        Msg "No hay archivos .QBW en la carpeta actual"
+        EXIT SUB
+    END IF
+    nm$ = PickFile$(n)
+    IF nm$ = "" THEN EXIT SUB
+    IF NameExists(nm$) THEN
+        Msg "Ese archivo ya esta en el Escritorio"
+        EXIT SUB
+    END IF
+    slot = AllocSlot
+    IF slot = 0 THEN
+        Msg "No hay espacio en el Escritorio"
+        EXIT SUB
+    END IF
+    LoadKind = 0
+    res = LoadDoc(nm$, slot)
+    SELECT CASE res
+        CASE 1
+            DeskCount = DeskCount + 1
+            Desk(DeskCount).Nombre = nm$
+            Desk(DeskCount).Tipo = LoadKind
+            Desk(DeskCount).Modificado = 0
+            Desk(DeskCount).EnDisco = -1
+            Desk(DeskCount).Slot = slot
+            OpenDeskFile DeskCount
+        CASE 2
+            FreeSlot slot
+            Msg "Tipo de archivo desconocido"
+        CASE 3
+            FreeSlot slot
+            Msg "El archivo no tiene formato QBWorks"
+        CASE ELSE
+            FreeSlot slot
+            Msg "No se pudo leer el archivo"
+    END SELECT
+END SUB

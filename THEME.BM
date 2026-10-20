@@ -1,0 +1,183 @@
+'==============================================================
+' THEME.BM - Aspecto de la pantalla
+' Nivel 1: paleta de monitor verde o ambar (_PALETTECOLOR).
+' Nivel 2: ventana grafica (ver GFX.BM), lineas de barrido.
+' Todo se guarda en QBWORKS.CFG:
+'   THEME n   1 = colores originales, 2 = verde, 3 = ambar
+'   GFX n     0 = modo texto, 1 = ventana grafica
+'   SCAN n    1 = lineas de barrido, 0 = sin lineas
+' Si la ventana grafica diera problemas, borre QBWORKS.CFG o
+' cambie la linea "GFX 1" por "GFX 0".
+'==============================================================
+
+' Brillo (0 a 1) que recibe cada color del programa
+FUNCTION ThemeK# (i)
+    SELECT CASE i
+        CASE 0: ThemeK# = 0
+        CASE 1: ThemeK# = .28
+        CASE 2: ThemeK# = .35
+        CASE 3: ThemeK# = .55
+        CASE 4: ThemeK# = .35
+        CASE 5: ThemeK# = .35
+        CASE 6: ThemeK# = .45
+        CASE 7: ThemeK# = .82
+        CASE 8: ThemeK# = .45
+        CASE 9: ThemeK# = .55
+        CASE 10: ThemeK# = .8
+        CASE 11: ThemeK# = .88
+        CASE 12: ThemeK# = .97
+        CASE 13: ThemeK# = .7
+        CASE 14: ThemeK# = .92
+        CASE ELSE: ThemeK# = 1
+    END SELECT
+END FUNCTION
+
+SUB ApplyTheme (n)
+    DIM i, r, g, b, baseR, baseG, baseB, k#
+    baseR = 60
+    baseG = 255
+    baseB = 100
+    IF n = 3 THEN
+        baseR = 255
+        baseG = 176
+        baseB = 0
+    END IF
+    FOR i = 0 TO 15
+        IF n = 2 OR n = 3 THEN
+            k# = ThemeK#(i)
+            r = INT(baseR * k#)
+            g = INT(baseG * k#)
+            b = INT(baseB * k#)
+        ELSE
+            ' paleta VGA original
+            r = 0
+            g = 0
+            b = 0
+            IF i AND 4 THEN r = 170
+            IF i AND 2 THEN g = 170
+            IF i AND 1 THEN b = 170
+            IF i = 6 THEN g = 85
+            IF i AND 8 THEN
+                r = r + 85
+                g = g + 85
+                b = b + 85
+            END IF
+        END IF
+        IF GfxOn THEN
+            _PALETTECOLOR i, _RGB32(r, g, b), textScr
+        ELSE
+            _PALETTECOLOR i, _RGB32(r, g, b)
+        END IF
+    NEXT
+END SUB
+
+SUB LoadTheme
+    DIM ff, l$, v
+    ThemeSel = 1
+    GfxMode = 0
+    ScanOn = -1
+    IF NOT _FILEEXISTS("QBWORKS.CFG") THEN EXIT SUB
+    ff = FREEFILE
+    ErrFlag = 0
+    ON ERROR GOTO FileErr
+    OPEN "QBWORKS.CFG" FOR INPUT AS #ff
+    IF ErrFlag = 0 THEN
+        DO WHILE NOT EOF(ff) AND ErrFlag = 0
+            LINE INPUT #ff, l$
+            IF ErrFlag = 0 THEN
+                IF LEFT$(l$, 6) = "THEME " THEN
+                    v = VAL(MID$(l$, 7))
+                    IF v >= 1 AND v <= 3 THEN ThemeSel = v
+                ELSEIF LEFT$(l$, 4) = "GFX " THEN
+                    IF VAL(MID$(l$, 5)) = 1 THEN GfxMode = -1
+                ELSEIF LEFT$(l$, 5) = "SCAN " THEN
+                    IF VAL(MID$(l$, 6)) = 0 THEN ScanOn = 0
+                END IF
+            END IF
+        LOOP
+    END IF
+    CLOSE #ff
+    ON ERROR GOTO 0
+END SUB
+
+SUB SaveTheme
+    DIM ff
+    ff = FREEFILE
+    ErrFlag = 0
+    ON ERROR GOTO FileErr
+    OPEN "QBWORKS.CFG" FOR OUTPUT AS #ff
+    IF ErrFlag = 0 THEN
+        PRINT #ff, "THEME " + N2S$(ThemeSel)
+        IF GfxMode THEN PRINT #ff, "GFX 1" ELSE PRINT #ff, "GFX 0"
+        IF ScanOn THEN PRINT #ff, "SCAN 1" ELSE PRINT #ff, "SCAN 0"
+    END IF
+    CLOSE #ff
+    ON ERROR GOTO 0
+END SUB
+
+SUB ToggleFull
+    IF FullOn THEN
+        _FULLSCREEN _OFF
+        FullOn = 0
+    ELSE
+        _FULLSCREEN _SQUAREPIXELS
+        FullOn = -1
+    END IF
+END SUB
+
+' Pantalla para elegir el aspecto; los colores y las lineas de
+' barrido se aplican al instante, la ventana grafica al reiniciar
+SUB ThemeMenu
+    DIM sel, choice, nm$, g$, s$
+    sel = ThemeSel
+    DO
+        CLS
+        TitleBar "Aspecto de la pantalla"
+        PrintAt 3, 3, "Se recuerda en QBWORKS.CFG", 15, 0
+        MenuCount = 6
+        MenuItem$(1) = "1. Colores originales"
+        MenuItem$(2) = "2. Monitor verde (fosforo)"
+        MenuItem$(3) = "3. Monitor ambar"
+        IF GfxMode THEN g$ = "grafica" ELSE g$ = "texto"
+        IF ScanOn THEN s$ = "si" ELSE s$ = "no"
+        MenuItem$(4) = "4. Ventana: " + g$ + " (cambia al reiniciar)"
+        MenuItem$(5) = "5. Lineas de barrido: " + s$
+        MenuItem$(6) = "6. Volver"
+        SELECT CASE ThemeSel
+            CASE 2: nm$ = "monitor verde"
+            CASE 3: nm$ = "monitor ambar"
+            CASE ELSE: nm$ = "colores originales"
+        END SELECT
+        PrintAt 13, 5, "Colores actuales: " + nm$, 7, 0
+        PrintAt 15, 5, "Ejemplo:", 7, 0
+        PrintAt 15, 15, "texto normal", 7, 0
+        PrintAt 15, 30, "estado", 14, 0
+        PrintAt 15, 39, "indicacion", 11, 0
+        PrintAt 15, 52, "error", 12, 0
+        IF GfxOn THEN
+            PrintAt 17, 5, "Ventana grafica activa.", 7, 0
+        ELSE
+            PrintAt 17, 5, "Modo texto activo. La ventana grafica usa PrintChar21.ttf si existe.", 7, 0
+        END IF
+        HelpBar "Flechas: mover   Enter: elegir   Esc: volver"
+        choice = RunMenu(5, 5, sel)
+        SELECT CASE choice
+            CASE 1, 2, 3
+                ThemeSel = choice
+                sel = choice
+                ApplyTheme ThemeSel
+                SaveTheme
+            CASE 4
+                sel = 4
+                GfxMode = NOT GfxMode
+                SaveTheme
+                Msg "Cierre el programa y abralo de nuevo para aplicar el cambio"
+            CASE 5
+                sel = 5
+                ScanOn = NOT ScanOn
+                SaveTheme
+            CASE ELSE
+                EXIT SUB
+        END SELECT
+    LOOP
+END SUB

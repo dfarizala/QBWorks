@@ -1,0 +1,699 @@
+'==============================================================
+' WP.BM - Procesador de textos
+' Documento = lineas de texto (maximo WPMAXLEN caracteres).
+' El texto se ajusta al escribir al llegar al margen derecho.
+' Estado del editor (variables compartidas): eIdx, eSlot, eL
+' (linea), eC (columna), eTop (primera linea visible), eGoal
+' (columna deseada), eIns (insertar), eMark (inicio de bloque)
+'==============================================================
+
+SUB InitDoc (s)
+    WPLines(s) = 1
+    WPText$(s, 1) = ""
+    WPCurL(s) = 1
+    WPCurC(s) = 1
+    WPTop(s) = 1
+END SUB
+
+SUB InsertLineAt (s, n, t$)
+    DIM i
+    FOR i = WPLines(s) TO n STEP -1
+        WPText$(s, i + 1) = WPText$(s, i)
+    NEXT
+    WPText$(s, n) = t$
+    WPLines(s) = WPLines(s) + 1
+END SUB
+
+SUB DeleteLineAt (s, n)
+    DIM i
+    FOR i = n TO WPLines(s) - 1
+        WPText$(s, i) = WPText$(s, i + 1)
+    NEXT
+    WPText$(s, WPLines(s)) = ""
+    WPLines(s) = WPLines(s) - 1
+END SUB
+
+'--------------------------------------------------------------
+'  PANTALLA DEL EDITOR
+'--------------------------------------------------------------
+SUB WPRedraw
+    DIM s, r, lnum, lo, hi, st$, rl$, i
+    s = eSlot
+    IF eL < 1 THEN eL = 1
+    IF eL > WPLines(s) THEN eL = WPLines(s)
+    IF eC < 1 THEN eC = 1
+    IF eC > LEN(WPText$(s, eL)) + 1 THEN eC = LEN(WPText$(s, eL)) + 1
+    IF eL < eTop THEN eTop = eL
+    IF eL > eTop + WPROWS - 1 THEN eTop = eL - WPROWS + 1
+    IF eTop < 1 THEN eTop = 1
+
+    ' Barra de titulo
+    st$ = RTRIM$(Desk(eIdx).Nombre) + " (Procesador de textos)"
+    IF Desk(eIdx).Modificado THEN st$ = st$ + " *"
+    TitleBar st$
+
+    ' Linea de estado
+    IF StatusMsg$ <> "" THEN
+        st$ = " " + StatusMsg$
+        StatusMsg$ = ""
+    ELSE
+        st$ = " Linea " + N2S$(eL) + "/" + N2S$(WPLines(s)) + "   Col " + N2S$(eC) + "   "
+        IF eIns THEN st$ = st$ + "Insertar" ELSE st$ = st$ + "Sobrescribir"
+        IF eMark > 0 THEN st$ = st$ + "   Bloque desde linea " + N2S$(eMark)
+    END IF
+    PrintAt 2, 1, LEFT$(st$ + SPACE$(79), 79), 14, 0
+
+    ' Regla
+    rl$ = ""
+    FOR i = 1 TO 79
+        IF i = 1 THEN
+            rl$ = rl$ + "["
+        ELSEIF i = WPMAXLEN THEN
+            rl$ = rl$ + "]"
+        ELSEIF i > WPMAXLEN THEN
+            rl$ = rl$ + " "
+        ELSEIF i MOD 10 = 0 THEN
+            rl$ = rl$ + "+"
+        ELSE
+            rl$ = rl$ + "-"
+        END IF
+    NEXT
+    PrintAt 3, 1, rl$, 3, 0
+
+    ' Texto
+    lo = eMark
+    hi = eL
+    IF lo > hi THEN SWAP lo, hi
+    FOR r = 0 TO WPROWS - 1
+        lnum = eTop + r
+        LOCATE 4 + r, 1
+        IF lnum <= WPLines(s) THEN
+            IF eMark > 0 AND lnum >= lo AND lnum <= hi THEN COLOR 15, 1 ELSE COLOR 7, 0
+            PRINT LEFT$(WPText$(s, lnum) + SPACE$(79), 79);
+        ELSE
+            COLOR 7, 0
+            PRINT SPACE$(79);
+        END IF
+    NEXT
+    COLOR 7, 0
+
+    HelpBar "Esc ^S:guardar ^P:imprimir ^F:buscar ^E:reflujo F3-F6:bloque F9:ortog F1:ayuda"
+    LOCATE 4 + eL - eTop, eC, 1
+    CursorWanted = -1
+END SUB
+
+SUB WPHelp
+    DIM k$
+    CLS
+    TitleBar "Ayuda - Procesador de textos"
+    PrintAt 3, 3, "MOVIMIENTO", 14, 0
+    PrintAt 4, 5, "Flechas, Inicio, Fin, RePag, AvPag", 7, 0
+    PrintAt 5, 5, "Ctrl+Izq / Ctrl+Der: palabra anterior / siguiente", 7, 0
+    PrintAt 6, 5, "Ctrl+Inicio / Ctrl+Fin: principio / fin del documento", 7, 0
+    PrintAt 8, 3, "EDICION", 14, 0
+    PrintAt 9, 5, "Insert: alterna insertar / sobrescribir", 7, 0
+    PrintAt 10, 5, "Retroceso, Supr: borrar caracter    Ctrl+Y: borrar linea", 7, 0
+    PrintAt 11, 5, "Enter: nueva linea    Tab: 4 espacios", 7, 0
+    PrintAt 13, 3, "BLOQUES (por lineas)", 14, 0
+    PrintAt 14, 5, "F3: marcar inicio (otra vez en la misma linea: quitar marca)", 7, 0
+    PrintAt 15, 5, "F4: copiar    F5: cortar    F6: pegar despues de la linea actual", 7, 0
+    PrintAt 16, 5, "El portapapeles es comun con la hoja de calculo y la base de datos", 7, 0
+    PrintAt 18, 3, "BUSQUEDA Y ARCHIVO", 14, 0
+    PrintAt 19, 5, "Ctrl+F: buscar (Enter repite la ultima)    Ctrl+R: reemplazar", 7, 0
+    PrintAt 20, 5, "Ctrl+S: guardar   Ctrl+P: imprimir   Ctrl+E: reformatear parrafo", 7, 0
+    PrintAt 21, 5, "F9: revisar ortografia (DICCIO.TXT y MIDIC.TXT)    Esc: salir", 7, 0
+    PrintAt 22, 3, "El texto se ajusta al escribir (margen 76 columnas).", 7, 0
+    HelpBar "Presione una tecla para volver"
+    k$ = GetKey$
+END SUB
+
+'--------------------------------------------------------------
+'  EDICION
+'--------------------------------------------------------------
+' Escribe un caracter en el cursor (con ajuste de linea)
+SUB WPType (ch$)
+    DIM s, t$, j, k, firstLen, shift, first$, rest$
+    s = eSlot
+    t$ = WPText$(s, eL)
+    IF LEN(t$) >= WPMAXLEN AND WPLines(s) >= MAXLINES THEN
+        StatusMsg$ = "Documento lleno"
+        EXIT SUB
+    END IF
+    IF eIns OR eC > LEN(t$) THEN
+        t$ = LEFT$(t$, eC - 1) + ch$ + MID$(t$, eC)
+    ELSE
+        MID$(t$, eC, 1) = ch$
+    END IF
+    eC = eC + 1
+    Desk(eIdx).Modificado = -1
+    IF LEN(t$) > WPMAXLEN THEN
+        ' buscar el ultimo espacio para cortar la linea
+        j = 0
+        FOR k = WPMAXLEN + 1 TO 2 STEP -1
+            IF MID$(t$, k, 1) = " " THEN
+                j = k
+                EXIT FOR
+            END IF
+        NEXT
+        IF j > 0 THEN
+            firstLen = j - 1
+            shift = j
+        ELSE
+            firstLen = WPMAXLEN
+            shift = WPMAXLEN
+        END IF
+        first$ = LEFT$(t$, firstLen)
+        rest$ = MID$(t$, shift + 1)
+        WPText$(s, eL) = first$
+        InsertLineAt s, eL + 1, rest$
+        IF eC > shift THEN
+            eL = eL + 1
+            eC = eC - shift
+        END IF
+    ELSE
+        WPText$(s, eL) = t$
+    END IF
+END SUB
+
+SUB WPEnter
+    DIM s, t$
+    s = eSlot
+    IF WPLines(s) >= MAXLINES THEN
+        StatusMsg$ = "Documento lleno"
+        EXIT SUB
+    END IF
+    t$ = WPText$(s, eL)
+    WPText$(s, eL) = LEFT$(t$, eC - 1)
+    InsertLineAt s, eL + 1, MID$(t$, eC)
+    eL = eL + 1
+    eC = 1
+    Desk(eIdx).Modificado = -1
+END SUB
+
+SUB WPBackspace
+    DIM s, t$, pv$
+    s = eSlot
+    t$ = WPText$(s, eL)
+    IF eC > 1 THEN
+        WPText$(s, eL) = LEFT$(t$, eC - 2) + MID$(t$, eC)
+        eC = eC - 1
+        Desk(eIdx).Modificado = -1
+    ELSEIF eL > 1 THEN
+        pv$ = WPText$(s, eL - 1)
+        IF LEN(pv$) + LEN(t$) <= WPMAXLEN THEN
+            WPText$(s, eL - 1) = pv$ + t$
+            DeleteLineAt s, eL
+            eL = eL - 1
+            eC = LEN(pv$) + 1
+            Desk(eIdx).Modificado = -1
+        ELSE
+            eL = eL - 1
+            eC = LEN(pv$) + 1
+        END IF
+    END IF
+END SUB
+
+SUB WPDelete
+    DIM s, t$, nx$
+    s = eSlot
+    t$ = WPText$(s, eL)
+    IF eC <= LEN(t$) THEN
+        WPText$(s, eL) = LEFT$(t$, eC - 1) + MID$(t$, eC + 1)
+        Desk(eIdx).Modificado = -1
+    ELSEIF eL < WPLines(s) THEN
+        nx$ = WPText$(s, eL + 1)
+        IF LEN(t$) + LEN(nx$) <= WPMAXLEN THEN
+            WPText$(s, eL) = t$ + nx$
+            DeleteLineAt s, eL + 1
+            Desk(eIdx).Modificado = -1
+        ELSE
+            StatusMsg$ = "No cabe: la linea quedaria demasiado larga"
+        END IF
+    END IF
+END SUB
+
+SUB WPDeleteLine
+    DIM s
+    s = eSlot
+    IF WPLines(s) > 1 THEN
+        DeleteLineAt s, eL
+        IF eL > WPLines(s) THEN eL = WPLines(s)
+    ELSE
+        WPText$(s, 1) = ""
+    END IF
+    eC = 1
+    eMark = 0
+    Desk(eIdx).Modificado = -1
+END SUB
+
+SUB WPWordLeft
+    DIM t$
+    t$ = WPText$(eSlot, eL)
+    IF eC = 1 THEN
+        IF eL > 1 THEN
+            eL = eL - 1
+            eC = LEN(WPText$(eSlot, eL)) + 1
+        END IF
+    ELSE
+        DO WHILE eC > 1
+            IF MID$(t$, eC - 1, 1) = " " THEN eC = eC - 1 ELSE EXIT DO
+        LOOP
+        DO WHILE eC > 1
+            IF MID$(t$, eC - 1, 1) <> " " THEN eC = eC - 1 ELSE EXIT DO
+        LOOP
+    END IF
+END SUB
+
+SUB WPWordRight
+    DIM t$
+    t$ = WPText$(eSlot, eL)
+    IF eC > LEN(t$) THEN
+        IF eL < WPLines(eSlot) THEN
+            eL = eL + 1
+            eC = 1
+        END IF
+    ELSE
+        DO WHILE eC <= LEN(t$)
+            IF MID$(t$, eC, 1) <> " " THEN eC = eC + 1 ELSE EXIT DO
+        LOOP
+        DO WHILE eC <= LEN(t$)
+            IF MID$(t$, eC, 1) = " " THEN eC = eC + 1 ELSE EXIT DO
+        LOOP
+    END IF
+END SUB
+
+'--------------------------------------------------------------
+'  BLOQUES (por lineas) Y PORTAPAPELES
+'--------------------------------------------------------------
+' doCut = 0 copia, doCut = -1 corta
+SUB WPCopyBlock (doCut)
+    DIM lo, hi, i, n, s
+    s = eSlot
+    IF eMark = 0 THEN
+        StatusMsg$ = "Primero marque el inicio del bloque con F3"
+        EXIT SUB
+    END IF
+    lo = eMark
+    hi = eL
+    IF lo > hi THEN SWAP lo, hi
+    ClipCount = 0
+    FOR i = lo TO hi
+        ClipCount = ClipCount + 1
+        Clip$(ClipCount) = WPText$(s, i)
+        GClip$(ClipCount, 1) = WPText$(s, i)
+    NEXT
+    GKind = 1
+    GRows = ClipCount
+    GCols = 1
+    IF doCut THEN
+        n = hi - lo + 1
+        IF n >= WPLines(s) THEN
+            WPLines(s) = 1
+            WPText$(s, 1) = ""
+            eL = 1
+        ELSE
+            FOR i = hi + 1 TO WPLines(s)
+                WPText$(s, i - n) = WPText$(s, i)
+            NEXT
+            FOR i = WPLines(s) - n + 1 TO WPLines(s)
+                WPText$(s, i) = ""
+            NEXT
+            WPLines(s) = WPLines(s) - n
+            eL = lo
+            IF eL > WPLines(s) THEN eL = WPLines(s)
+        END IF
+        eC = 1
+        Desk(eIdx).Modificado = -1
+        StatusMsg$ = "Bloque cortado (" + N2S$(ClipCount) + " lineas)"
+    ELSE
+        StatusMsg$ = "Bloque copiado (" + N2S$(ClipCount) + " lineas)"
+    END IF
+    eMark = 0
+END SUB
+
+SUB WPPaste
+    DIM s, i
+    s = eSlot
+    IF GKind = 2 OR GKind = 3 THEN
+        WPPasteForeign
+        EXIT SUB
+    END IF
+    IF ClipCount = 0 THEN
+        StatusMsg$ = "El portapapeles esta vacio"
+        EXIT SUB
+    END IF
+    IF WPLines(s) + ClipCount > MAXLINES THEN
+        StatusMsg$ = "No hay espacio para pegar"
+        EXIT SUB
+    END IF
+    FOR i = WPLines(s) TO eL + 1 STEP -1
+        WPText$(s, i + ClipCount) = WPText$(s, i)
+    NEXT
+    FOR i = 1 TO ClipCount
+        WPText$(s, eL + i) = Clip$(i)
+    NEXT
+    WPLines(s) = WPLines(s) + ClipCount
+    eL = eL + 1
+    eC = 1
+    eMark = 0
+    Desk(eIdx).Modificado = -1
+    StatusMsg$ = "Bloque pegado (" + N2S$(ClipCount) + " lineas)"
+END SUB
+
+'--------------------------------------------------------------
+'  BUSCAR Y REEMPLAZAR
+'--------------------------------------------------------------
+' Pide un texto en la linea de estado. Cancelled = -1 si Esc.
+FUNCTION PromptLine$ (p$, def$)
+    DIM r$
+    PrintAt 2, 1, LEFT$(" " + p$ + SPACE$(79), 79), 11, 0
+    r$ = ReadLine$(2, 3 + LEN(p$), 40, def$)
+    PromptLine$ = r$
+END FUNCTION
+
+' Busca needle$ desde (sl, sc). Si wrapIt es -1 continua desde el
+' principio del documento. Deja el resultado en FoundL, FoundC.
+FUNCTION FindText (needle$, sl, sc, wrapIt)
+    DIM i, p, nd$, hay$, s
+    s = eSlot
+    nd$ = UCASE$(needle$)
+    FindText = 0
+    FOR i = sl TO WPLines(s)
+        hay$ = UCASE$(WPText$(s, i))
+        IF i = sl THEN p = INSTR(sc, hay$, nd$) ELSE p = INSTR(hay$, nd$)
+        IF p > 0 THEN
+            FoundL = i
+            FoundC = p
+            FindText = -1
+            EXIT FUNCTION
+        END IF
+    NEXT
+    IF wrapIt THEN
+        FOR i = 1 TO sl
+            hay$ = UCASE$(WPText$(s, i))
+            p = INSTR(hay$, nd$)
+            IF p > 0 THEN
+                FoundL = i
+                FoundC = p
+                FindText = -1
+                EXIT FUNCTION
+            END IF
+        NEXT
+    END IF
+END FUNCTION
+
+SUB WPFind
+    DIM f$
+    f$ = PromptLine$("Buscar:", LastFind$)
+    IF Cancelled OR f$ = "" THEN EXIT SUB
+    LastFind$ = f$
+    IF FindText(f$, eL, eC + 1, -1) THEN
+        eL = FoundL
+        eC = FoundC
+    ELSE
+        StatusMsg$ = "No se encontro: " + f$
+    END IF
+END SUB
+
+SUB WPReplace
+    DIM f$, r$, s, n, skipped, allFlag, sl, sc, k$, nline$, oline$
+    f$ = PromptLine$("Buscar:", LastFind$)
+    IF Cancelled OR f$ = "" THEN EXIT SUB
+    r$ = PromptLine$("Reemplazar por:", LastRepl$)
+    IF Cancelled THEN EXIT SUB
+    LastFind$ = f$
+    LastRepl$ = r$
+    s = eSlot
+    n = 0
+    skipped = 0
+    allFlag = 0
+    sl = eL
+    sc = eC
+    DO
+        IF NOT FindText(f$, sl, sc, 0) THEN EXIT DO
+        eL = FoundL
+        eC = FoundC
+        IF NOT allFlag THEN
+            WPRedraw
+            PrintAt 2, 1, LEFT$(" Reemplazar?   S=si   N=no   T=todos   Esc=parar" + SPACE$(79), 79), 14, 0
+            LOCATE 4 + eL - eTop, eC, 1
+            CursorWanted = -1
+            DO
+                k$ = UCASE$(GetKey$)
+            LOOP UNTIL k$ = "S" OR k$ = "N" OR k$ = "T" OR k$ = CHR$(27)
+            IF k$ = CHR$(27) THEN EXIT DO
+            IF k$ = "T" THEN
+                allFlag = -1
+                k$ = "S"
+            END IF
+        ELSE
+            k$ = "S"
+        END IF
+        IF k$ = "S" THEN
+            oline$ = WPText$(s, FoundL)
+            nline$ = LEFT$(oline$, FoundC - 1) + r$ + MID$(oline$, FoundC + LEN(f$))
+            IF LEN(nline$) > WPMAXLEN THEN
+                skipped = skipped + 1
+                sl = FoundL
+                sc = FoundC + 1
+            ELSE
+                WPText$(s, FoundL) = nline$
+                Desk(eIdx).Modificado = -1
+                n = n + 1
+                sl = FoundL
+                sc = FoundC + LEN(r$)
+            END IF
+        ELSE
+            sl = FoundL
+            sc = FoundC + 1
+        END IF
+    LOOP
+    StatusMsg$ = "Reemplazos hechos: " + N2S$(n)
+    IF skipped > 0 THEN StatusMsg$ = StatusMsg$ + "   (omitidos por largo de linea: " + N2S$(skipped) + ")"
+END SUB
+
+'--------------------------------------------------------------
+'  EDITOR PRINCIPAL
+'--------------------------------------------------------------
+SUB WPEdit (idx)
+    DIM k$, s, vert, i
+    eIdx = idx
+    eSlot = Desk(idx).Slot
+    s = eSlot
+    eL = WPCurL(s)
+    eC = WPCurC(s)
+    eTop = WPTop(s)
+    eGoal = eC
+    eIns = -1
+    eMark = 0
+    StatusMsg$ = ""
+    DO
+        WPRedraw
+        k$ = GetKey$
+        vert = 0
+        SELECT CASE k$
+            CASE CHR$(27)
+                EXIT DO
+            CASE CHR$(0) + "K"
+                IF eC > 1 THEN
+                    eC = eC - 1
+                ELSEIF eL > 1 THEN
+                    eL = eL - 1
+                    eC = LEN(WPText$(s, eL)) + 1
+                END IF
+            CASE CHR$(0) + "M"
+                IF eC <= LEN(WPText$(s, eL)) THEN
+                    eC = eC + 1
+                ELSEIF eL < WPLines(s) THEN
+                    eL = eL + 1
+                    eC = 1
+                END IF
+            CASE CHR$(0) + "H"
+                vert = -1
+                IF eL > 1 THEN eL = eL - 1
+                eC = eGoal
+            CASE CHR$(0) + "P"
+                vert = -1
+                IF eL < WPLines(s) THEN eL = eL + 1
+                eC = eGoal
+            CASE CHR$(0) + "I"
+                vert = -1
+                eL = eL - WPROWS
+                IF eL < 1 THEN eL = 1
+                eC = eGoal
+            CASE CHR$(0) + "Q"
+                vert = -1
+                eL = eL + WPROWS
+                IF eL > WPLines(s) THEN eL = WPLines(s)
+                eC = eGoal
+            CASE CHR$(0) + "G"
+                eC = 1
+            CASE CHR$(0) + "O"
+                eC = LEN(WPText$(s, eL)) + 1
+            CASE CHR$(0) + "w"
+                eL = 1
+                eC = 1
+            CASE CHR$(0) + "u"
+                eL = WPLines(s)
+                eC = LEN(WPText$(s, eL)) + 1
+            CASE CHR$(0) + "s"
+                WPWordLeft
+            CASE CHR$(0) + "t"
+                WPWordRight
+            CASE CHR$(0) + "R"
+                eIns = NOT eIns
+            CASE CHR$(0) + "S"
+                WPDelete
+            CASE CHR$(8)
+                WPBackspace
+            CASE CHR$(13)
+                WPEnter
+            CASE CHR$(9)
+                FOR i = 1 TO 4
+                    WPType " "
+                NEXT
+            CASE CHR$(25)
+                WPDeleteLine
+            CASE CHR$(19)
+                IF SaveOne(idx) THEN StatusMsg$ = "Archivo guardado" ELSE StatusMsg$ = "No se guardo el archivo"
+            CASE CHR$(6)
+                WPFind
+            CASE CHR$(18)
+                WPReplace
+            CASE CHR$(0) + ";"
+                WPHelp
+            CASE CHR$(0) + "="
+                IF eMark = eL THEN eMark = 0 ELSE eMark = eL
+            CASE CHR$(0) + ">"
+                WPCopyBlock 0
+            CASE CHR$(0) + "?"
+                WPCopyBlock -1
+            CASE CHR$(0) + "@"
+                WPPaste
+            CASE CHR$(16)
+                PrintDoc idx
+            CASE CHR$(5)
+                WPReflow
+            CASE CHR$(0) + "C"
+                WPSpell
+            CASE ELSE
+                IF LEN(k$) = 1 THEN
+                    IF ASC(k$) >= 32 AND ASC(k$) <> 127 THEN WPType k$
+                END IF
+        END SELECT
+        IF NOT vert THEN eGoal = eC
+    LOOP
+    WPCurL(s) = eL
+    WPCurC(s) = eC
+    WPTop(s) = eTop
+    LOCATE , , 0
+    CursorWanted = 0
+END SUB
+
+'--------------------------------------------------------------
+'  ETAPA 5: PEGAR DESDE OTROS MODULOS Y REFORMATEAR PARRAFOS
+'--------------------------------------------------------------
+' Pega el portapapeles comun (hoja o base de datos) como lineas
+SUB WPPasteForeign
+    DIM s, i
+    s = eSlot
+    GClipToLines
+    IF GLn = 0 THEN
+        StatusMsg$ = "El portapapeles esta vacio"
+        EXIT SUB
+    END IF
+    IF WPLines(s) + GLn > MAXLINES THEN
+        StatusMsg$ = "No hay espacio para pegar"
+        EXIT SUB
+    END IF
+    FOR i = WPLines(s) TO eL + 1 STEP -1
+        WPText$(s, i + GLn) = WPText$(s, i)
+    NEXT
+    FOR i = 1 TO GLn
+        WPText$(s, eL + i) = GLine$(i)
+    NEXT
+    WPLines(s) = WPLines(s) + GLn
+    eL = eL + 1
+    eC = 1
+    eMark = 0
+    Desk(eIdx).Modificado = -1
+    StatusMsg$ = "Pegado desde el portapapeles comun (" + N2S$(GLn) + " lineas)"
+END SUB
+
+' Reformatea el parrafo del cursor (lineas seguidas sin lineas vacias)
+SUB WPReflow
+    DIM s, a, b, i, j, k, oldN, newN, delta, t$
+    s = eSlot
+    IF WPText$(s, eL) = "" THEN
+        StatusMsg$ = "Coloque el cursor dentro de un parrafo"
+        EXIT SUB
+    END IF
+    a = eL
+    DO WHILE a > 1
+        IF WPText$(s, a - 1) <> "" THEN
+            a = a - 1
+        ELSE
+            EXIT DO
+        END IF
+    LOOP
+    b = eL
+    DO WHILE b < WPLines(s)
+        IF WPText$(s, b + 1) <> "" THEN
+            b = b + 1
+        ELSE
+            EXIT DO
+        END IF
+    LOOP
+    t$ = RTRIM$(WPText$(s, a))
+    FOR i = a + 1 TO b
+        t$ = t$ + " " + LTRIM$(RTRIM$(WPText$(s, i)))
+    NEXT
+    newN = 0
+    DO WHILE LEN(t$) > WPMAXLEN
+        j = 0
+        FOR k = WPMAXLEN + 1 TO 2 STEP -1
+            IF MID$(t$, k, 1) = " " THEN
+                j = k
+                EXIT FOR
+            END IF
+        NEXT
+        newN = newN + 1
+        IF j > 0 THEN
+            GLine$(newN) = RTRIM$(LEFT$(t$, j - 1))
+            t$ = LTRIM$(MID$(t$, j + 1))
+        ELSE
+            GLine$(newN) = LEFT$(t$, WPMAXLEN)
+            t$ = MID$(t$, WPMAXLEN + 1)
+        END IF
+        IF newN >= MAXLINES - 1 THEN EXIT DO
+    LOOP
+    newN = newN + 1
+    GLine$(newN) = t$
+    oldN = b - a + 1
+    delta = newN - oldN
+    IF delta > 0 THEN
+        IF WPLines(s) + delta > MAXLINES THEN
+            StatusMsg$ = "No hay espacio para reformatear"
+            EXIT SUB
+        END IF
+        FOR i = WPLines(s) TO b + 1 STEP -1
+            WPText$(s, i + delta) = WPText$(s, i)
+        NEXT
+    ELSEIF delta < 0 THEN
+        FOR i = b + 1 TO WPLines(s)
+            WPText$(s, i + delta) = WPText$(s, i)
+        NEXT
+        FOR i = WPLines(s) + delta + 1 TO WPLines(s)
+            WPText$(s, i) = ""
+        NEXT
+    END IF
+    WPLines(s) = WPLines(s) + delta
+    FOR i = 1 TO newN
+        WPText$(s, a + i - 1) = GLine$(i)
+    NEXT
+    eL = a
+    eC = 1
+    eMark = 0
+    Desk(eIdx).Modificado = -1
+    StatusMsg$ = "Parrafo reformateado"
+END SUB

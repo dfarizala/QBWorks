@@ -1,0 +1,76 @@
+'==============================================================
+' CLIP.BM - Portapapeles comun entre texto, hoja y base de datos
+' Cada copia deja una copia en forma de cuadricula de texto:
+'   GClip$(fila, columna), GRows, GCols, y GKind:
+'     0 = vacio, 1 = lineas de texto, 2 = rango de hoja,
+'     3 = registros de base de datos
+' Al pegar en otro tipo de archivo, la cuadricula se convierte:
+'   texto -> hoja/base: cada linea es una fila; las columnas se
+'            separan con TAB o con 2 o mas espacios.
+'   hoja/base -> texto: filas alineadas en columnas.
+'==============================================================
+
+SUB AddSplit (c$)
+    IF SplitN < MAXCOLS THEN
+        SplitN = SplitN + 1
+        SplitCell$(SplitN) = c$
+    END IF
+END SUB
+
+' Divide una linea en celdas SplitCell$(1..SplitN)
+SUB SplitCells (t$)
+    DIM i, ch$, cur$, sp
+    SplitN = 0
+    cur$ = ""
+    sp = 0
+    FOR i = 1 TO LEN(t$)
+        ch$ = MID$(t$, i, 1)
+        IF ch$ = CHR$(9) THEN
+            AddSplit cur$
+            cur$ = ""
+            sp = 0
+        ELSEIF ch$ = " " THEN
+            sp = sp + 1
+        ELSE
+            IF sp >= 2 AND cur$ <> "" THEN
+                AddSplit cur$
+                cur$ = ch$
+            ELSEIF sp >= 1 AND cur$ <> "" THEN
+                cur$ = cur$ + " " + ch$
+            ELSE
+                cur$ = cur$ + ch$
+            END IF
+            sp = 0
+        END IF
+    NEXT
+    IF cur$ <> "" OR SplitN = 0 THEN AddSplit cur$
+END SUB
+
+' Convierte el portapapeles comun en lineas de texto GLine$(1..GLn)
+SUB GClipToLines
+    DIM i, c, ln$
+    DIM w(1 TO MAXCOLS)
+    GLn = 0
+    IF GKind = 1 THEN
+        FOR i = 1 TO GRows
+            GLine$(i) = GClip$(i, 1)
+        NEXT
+        GLn = GRows
+    ELSEIF GKind = 2 OR GKind = 3 THEN
+        FOR c = 1 TO GCols
+            w(c) = 1
+            FOR i = 1 TO GRows
+                IF LEN(GClip$(i, c)) > w(c) THEN w(c) = LEN(GClip$(i, c))
+            NEXT
+            IF w(c) > 25 THEN w(c) = 25
+        NEXT
+        FOR i = 1 TO GRows
+            ln$ = ""
+            FOR c = 1 TO GCols
+                ln$ = ln$ + LEFT$(GClip$(i, c) + SPACE$(w(c)), w(c)) + "  "
+            NEXT
+            GLine$(i) = LEFT$(RTRIM$(ln$), WPMAXLEN)
+        NEXT
+        GLn = GRows
+    END IF
+END SUB

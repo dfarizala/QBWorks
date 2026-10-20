@@ -1,0 +1,1327 @@
+'==============================================================
+' SS.BM - Hoja de calculo
+' Hoja de MAXROWS filas x MAXCOLS columnas (A a Z).
+' Cada celda guarda el texto tal como se escribio (SSRaw$):
+'   numero    12.5
+'   texto     Ventas      (o "2024 para forzar texto)
+'   formula   =A1+B2*2    (tambien +A1+B2 o @SUM(A1:A9))
+' Los valores calculados se guardan en SSVal / SSErr y se
+' recalculan por completo despues de cada cambio.
+' Codigos de error: 1 #ERR, 2 #CIRC, 3 #DIV/0, 4 #REF
+'==============================================================
+
+SUB InitSheet (sl)
+    DIM r, c
+    FOR r = 1 TO MAXROWS
+        FOR c = 1 TO MAXCOLS
+            SSRaw$(sl, r, c) = ""
+            SSVal(sl, r, c) = 0
+            SSErr(sl, r, c) = 0
+            SSState(sl, r, c) = 0
+        NEXT
+    NEXT
+    SSCurR(sl) = 1
+    SSCurC(sl) = 1
+    SSTopR(sl) = 1
+    SSLeftC(sl) = 1
+    SSColW(sl) = 9
+    SSDec(sl) = -1
+END SUB
+
+'--------------------------------------------------------------
+'  UTILIDADES DE CELDAS
+'--------------------------------------------------------------
+FUNCTION ColName$ (c)
+    ColName$ = CHR$(64 + c)
+END FUNCTION
+
+FUNCTION CellAddr$ (r, c)
+    CellAddr$ = CHR$(64 + c) + N2S$(r)
+END FUNCTION
+
+FUNCTION IsNumber (t$)
+    DIM i, ch$, digits, dots, st
+    IsNumber = 0
+    IF LEN(t$) = 0 OR LEN(t$) > 30 THEN EXIT FUNCTION
+    st = 1
+    IF LEFT$(t$, 1) = "-" OR LEFT$(t$, 1) = "+" THEN st = 2
+    digits = 0
+    dots = 0
+    FOR i = st TO LEN(t$)
+        ch$ = MID$(t$, i, 1)
+        IF ch$ >= "0" AND ch$ <= "9" THEN
+            digits = digits + 1
+        ELSEIF ch$ = "." THEN
+            dots = dots + 1
+        ELSE
+            EXIT FUNCTION
+        END IF
+    NEXT
+    IF digits > 0 AND dots <= 1 THEN IsNumber = -1
+END FUNCTION
+
+' 0 = vacia, 1 = numero, 2 = texto, 3 = formula
+FUNCTION CellKind (raw$)
+    IF raw$ = "" THEN
+        CellKind = 0
+    ELSEIF LEFT$(raw$, 1) = "=" THEN
+        CellKind = 3
+    ELSEIF IsNumber(raw$) THEN
+        CellKind = 1
+    ELSE
+        CellKind = 2
+    END IF
+END FUNCTION
+
+FUNCTION DisplayText$ (raw$)
+    IF LEFT$(raw$, 1) = CHR$(34) THEN
+        DisplayText$ = MID$(raw$, 2)
+    ELSE
+        DisplayText$ = raw$
+    END IF
+END FUNCTION
+
+FUNCTION ErrText$ (code)
+    SELECT CASE code
+        CASE 1: ErrText$ = "#ERR"
+        CASE 2: ErrText$ = "#CIRC"
+        CASE 3: ErrText$ = "#DIV/0"
+        CASE 4: ErrText$ = "#REF"
+        CASE ELSE: ErrText$ = "#ERR"
+    END SELECT
+END FUNCTION
+
+' Quita espacios y pasa a mayusculas
+FUNCTION PrepFormula$ (f$)
+    DIM i, ch$, o$
+    o$ = ""
+    FOR i = 1 TO LEN(f$)
+        ch$ = MID$(f$, i, 1)
+        IF ch$ <> " " THEN o$ = o$ + UCASE$(ch$)
+    NEXT
+    PrepFormula$ = o$
+END FUNCTION
+
+' Interpreta lo que escribio el usuario y devuelve el texto a guardar
+FUNCTION NormalizeEntry$ (t$)
+    DIM x$, f$
+    x$ = LTRIM$(RTRIM$(t$))
+    NormalizeEntry$ = x$
+    IF x$ = "" THEN EXIT FUNCTION
+    f$ = LEFT$(x$, 1)
+    IF f$ = "=" THEN
+        NormalizeEntry$ = "=" + UCASE$(MID$(x$, 2))
+    ELSEIF f$ = "+" OR f$ = "-" THEN
+        IF IsNumber(x$) THEN
+            NormalizeEntry$ = x$
+        ELSE
+            NormalizeEntry$ = "=" + UCASE$(x$)
+        END IF
+    ELSEIF f$ = "@" OR f$ = "(" THEN
+        NormalizeEntry$ = "=" + UCASE$(x$)
+    END IF
+END FUNCTION
+
+'--------------------------------------------------------------
+'  EVALUADOR DE FORMULAS
+'  Estado compartido: fS$ (formula sin espacios), fP (posicion),
+'  fErr (codigo de error), fSlot (hoja que se calcula)
+'--------------------------------------------------------------
+FUNCTION PeekCh$
+    IF fP <= LEN(fS$) THEN
+        PeekCh$ = MID$(fS$, fP, 1)
+    ELSE
+        PeekCh$ = ""
+    END IF
+END FUNCTION
+
+SUB SetErr (code)
+    IF fErr = 0 THEN fErr = code
+END SUB
+
+' Lee una referencia (A1, $A$1) en la posicion actual.
+' Devuelve -1 si la leyo y avanza fP.
+FUNCTION ReadRef (r, c)
+    DIM p, ch$, num$, cc
+    ReadRef = 0
+    p = fP
+    IF p <= LEN(fS$) THEN
+        IF MID$(fS$, p, 1) = "$" THEN p = p + 1
+    END IF
+    IF p > LEN(fS$) THEN EXIT FUNCTION
+    ch$ = MID$(fS$, p, 1)
+    IF ch$ < "A" OR ch$ > "Z" THEN EXIT FUNCTION
+    cc = ASC(ch$) - 64
+    p = p + 1
+    IF p <= LEN(fS$) THEN
+        IF MID$(fS$, p, 1) = "$" THEN p = p + 1
+    END IF
+    num$ = ""
+    DO WHILE p <= LEN(fS$)
+        ch$ = MID$(fS$, p, 1)
+        IF ch$ >= "0" AND ch$ <= "9" THEN
+            num$ = num$ + ch$
+            p = p + 1
+        ELSE
+            EXIT DO
+        END IF
+    LOOP
+    IF num$ = "" OR LEN(num$) > 4 THEN EXIT FUNCTION
+    r = VAL(num$)
+    c = cc
+    fP = p
+    ReadRef = -1
+END FUNCTION
+
+FUNCTION RefValue# (r, c)
+    IF r < 1 OR r > MAXROWS OR c < 1 OR c > MAXCOLS THEN
+        SetErr 4
+        RefValue# = 0
+    ELSE
+        RefValue# = CellValue#(fSlot, r, c)
+    END IF
+END FUNCTION
+
+' Nivel mas bajo: comparaciones
+FUNCTION ParseCmp# (d)
+    DIM v#, w#, op$, ch$
+    v# = ParseAdd#(0)
+    DO
+        op$ = ""
+        ch$ = PeekCh$
+        IF ch$ = "<" OR ch$ = ">" OR ch$ = "=" THEN
+            op$ = ch$
+            fP = fP + 1
+            ch$ = PeekCh$
+            IF (op$ = "<" AND (ch$ = "=" OR ch$ = ">")) OR (op$ = ">" AND ch$ = "=") THEN
+                op$ = op$ + ch$
+                fP = fP + 1
+            END IF
+        END IF
+        IF op$ = "" THEN EXIT DO
+        w# = ParseAdd#(0)
+        SELECT CASE op$
+            CASE "<": IF v# < w# THEN v# = 1 ELSE v# = 0
+            CASE ">": IF v# > w# THEN v# = 1 ELSE v# = 0
+            CASE "=": IF v# = w# THEN v# = 1 ELSE v# = 0
+            CASE "<=": IF v# <= w# THEN v# = 1 ELSE v# = 0
+            CASE ">=": IF v# >= w# THEN v# = 1 ELSE v# = 0
+            CASE "<>": IF v# <> w# THEN v# = 1 ELSE v# = 0
+        END SELECT
+    LOOP
+    ParseCmp# = v#
+END FUNCTION
+
+FUNCTION ParseAdd# (d)
+    DIM v#, w#, ch$
+    v# = ParseMul#(0)
+    DO
+        ch$ = PeekCh$
+        IF ch$ = "+" OR ch$ = "-" THEN
+            fP = fP + 1
+            w# = ParseMul#(0)
+            IF ch$ = "+" THEN
+                v# = v# + w#
+            ELSE
+                v# = v# - w#
+            END IF
+            IF ABS(v#) > 1E+300 THEN
+                SetErr 1
+                v# = 0
+            END IF
+        ELSE
+            EXIT DO
+        END IF
+    LOOP
+    ParseAdd# = v#
+END FUNCTION
+
+FUNCTION ParseMul# (d)
+    DIM v#, w#, ch$
+    v# = ParsePow#(0)
+    DO
+        ch$ = PeekCh$
+        IF ch$ = "*" OR ch$ = "/" THEN
+            fP = fP + 1
+            w# = ParsePow#(0)
+            IF ch$ = "*" THEN
+                IF v# <> 0 AND w# <> 0 THEN
+                    IF LOG(ABS(v#)) + LOG(ABS(w#)) > 690 THEN
+                        SetErr 1
+                        v# = 0
+                    ELSE
+                        v# = v# * w#
+                    END IF
+                ELSE
+                    v# = 0
+                END IF
+            ELSE
+                IF w# = 0 THEN
+                    SetErr 3
+                    v# = 0
+                ELSEIF v# <> 0 THEN
+                    IF LOG(ABS(v#)) - LOG(ABS(w#)) > 690 THEN
+                        SetErr 1
+                        v# = 0
+                    ELSE
+                        v# = v# / w#
+                    END IF
+                END IF
+            END IF
+        ELSE
+            EXIT DO
+        END IF
+    LOOP
+    ParseMul# = v#
+END FUNCTION
+
+FUNCTION ParsePow# (d)
+    DIM v#, w#
+    v# = ParseUnary#(0)
+    IF PeekCh$ = "^" THEN
+        fP = fP + 1
+        w# = ParsePow#(0)
+        IF v# = 0 THEN
+            IF w# < 0 THEN
+                SetErr 3
+                v# = 0
+            ELSEIF w# = 0 THEN
+                v# = 1
+            ELSE
+                v# = 0
+            END IF
+        ELSEIF v# < 0 AND w# <> INT(w#) THEN
+            SetErr 1
+            v# = 0
+        ELSEIF ABS(w#) * LOG(ABS(v#)) > 690 THEN
+            SetErr 1
+            v# = 0
+        ELSE
+            v# = v# ^ w#
+        END IF
+    END IF
+    ParsePow# = v#
+END FUNCTION
+
+FUNCTION ParseUnary# (d)
+    DIM ch$, v#
+    ch$ = PeekCh$
+    IF ch$ = "-" THEN
+        fP = fP + 1
+        v# = ParseUnary#(0)
+        ParseUnary# = -v#
+    ELSEIF ch$ = "+" THEN
+        fP = fP + 1
+        ParseUnary# = ParseUnary#(0)
+    ELSE
+        ParseUnary# = ParsePrimary#(0)
+    END IF
+END FUNCTION
+
+FUNCTION ParsePrimary# (d)
+    DIM ch$, v#, st, nm$, r, c
+    ParsePrimary# = 0
+    ch$ = PeekCh$
+    IF ch$ = "" THEN
+        SetErr 1
+        EXIT FUNCTION
+    END IF
+    IF ch$ = "(" THEN
+        fP = fP + 1
+        v# = ParseCmp#(0)
+        IF PeekCh$ = ")" THEN
+            fP = fP + 1
+        ELSE
+            SetErr 1
+        END IF
+        ParsePrimary# = v#
+        EXIT FUNCTION
+    END IF
+    IF (ch$ >= "0" AND ch$ <= "9") OR ch$ = "." THEN
+        st = fP
+        DO WHILE fP <= LEN(fS$)
+            ch$ = MID$(fS$, fP, 1)
+            IF (ch$ >= "0" AND ch$ <= "9") OR ch$ = "." THEN
+                fP = fP + 1
+            ELSE
+                EXIT DO
+            END IF
+        LOOP
+        v# = VAL(MID$(fS$, st, fP - st))
+        IF ABS(v#) > 1E+300 THEN
+            SetErr 1
+            v# = 0
+        END IF
+        ParsePrimary# = v#
+        EXIT FUNCTION
+    END IF
+    IF ch$ = "@" THEN
+        fP = fP + 1
+        ch$ = PeekCh$
+    END IF
+    IF ch$ = "$" OR (ch$ >= "A" AND ch$ <= "Z") THEN
+        IF ReadRef(r, c) THEN
+            ParsePrimary# = RefValue#(r, c)
+            EXIT FUNCTION
+        END IF
+        nm$ = ""
+        DO WHILE fP <= LEN(fS$)
+            ch$ = MID$(fS$, fP, 1)
+            IF ch$ >= "A" AND ch$ <= "Z" THEN
+                nm$ = nm$ + ch$
+                fP = fP + 1
+            ELSE
+                EXIT DO
+            END IF
+        LOOP
+        IF nm$ <> "" AND PeekCh$ = "(" THEN
+            ParsePrimary# = CallFunc#(nm$)
+        ELSEIF nm$ = "PI" THEN
+            ParsePrimary# = 3.14159265358979#
+        ELSE
+            SetErr 1
+        END IF
+        EXIT FUNCTION
+    END IF
+    SetErr 1
+END FUNCTION
+
+' Llamada a funcion; fP esta sobre el "(" de apertura
+FUNCTION CallFunc# (nm$)
+    DIM n, cnt, sum#, mn#, mx#, v#, a1#, a2#, p#
+    DIM r1, c1, r2, c2, rr, cc, sp, isRange, ck
+    DIM cond#, tv#, fv#, errA, errB
+    CallFunc# = 0
+    fP = fP + 1
+    SELECT CASE nm$
+        CASE "SUM", "AVG", "AVERAGE", "MIN", "MAX", "COUNT"
+            cnt = 0
+            sum# = 0
+            mn# = 0
+            mx# = 0
+            IF PeekCh$ <> ")" THEN
+                DO
+                    sp = fP
+                    isRange = 0
+                    IF ReadRef(r1, c1) THEN
+                        IF PeekCh$ = ":" THEN
+                            fP = fP + 1
+                            IF ReadRef(r2, c2) THEN
+                                isRange = -1
+                            ELSE
+                                SetErr 1
+                            END IF
+                        END IF
+                    END IF
+                    IF fErr <> 0 THEN EXIT DO
+                    IF isRange THEN
+                        IF r1 > r2 THEN SWAP r1, r2
+                        IF c1 > c2 THEN SWAP c1, c2
+                        IF r1 < 1 OR r2 > MAXROWS OR c1 < 1 OR c2 > MAXCOLS THEN
+                            SetErr 4
+                        ELSE
+                            FOR rr = r1 TO r2
+                                FOR cc = c1 TO c2
+                                    ck = CellKind(SSRaw$(fSlot, rr, cc))
+                                    IF ck = 1 OR ck = 3 THEN
+                                        v# = CellValue#(fSlot, rr, cc)
+                                        IF cnt = 0 THEN
+                                            mn# = v#
+                                            mx# = v#
+                                        ELSE
+                                            IF v# < mn# THEN mn# = v#
+                                            IF v# > mx# THEN mx# = v#
+                                        END IF
+                                        sum# = sum# + v#
+                                        cnt = cnt + 1
+                                    END IF
+                                NEXT
+                            NEXT
+                        END IF
+                    ELSE
+                        fP = sp
+                        v# = ParseCmp#(0)
+                        IF cnt = 0 THEN
+                            mn# = v#
+                            mx# = v#
+                        ELSE
+                            IF v# < mn# THEN mn# = v#
+                            IF v# > mx# THEN mx# = v#
+                        END IF
+                        sum# = sum# + v#
+                        cnt = cnt + 1
+                    END IF
+                    IF fErr <> 0 THEN EXIT DO
+                    IF PeekCh$ = "," THEN
+                        fP = fP + 1
+                    ELSE
+                        EXIT DO
+                    END IF
+                LOOP
+            END IF
+            IF PeekCh$ = ")" THEN
+                fP = fP + 1
+            ELSE
+                SetErr 1
+            END IF
+            IF ABS(sum#) > 1E+300 THEN SetErr 1
+            IF fErr = 0 THEN
+                SELECT CASE nm$
+                    CASE "SUM"
+                        CallFunc# = sum#
+                    CASE "AVG", "AVERAGE"
+                        IF cnt = 0 THEN
+                            SetErr 3
+                        ELSE
+                            CallFunc# = sum# / cnt
+                        END IF
+                    CASE "MIN"
+                        CallFunc# = mn#
+                    CASE "MAX"
+                        CallFunc# = mx#
+                    CASE "COUNT"
+                        CallFunc# = cnt
+                END SELECT
+            END IF
+
+        CASE "IF"
+            ' Evalua solo la rama elegida (el error de la otra se descarta)
+            cond# = ParseCmp#(0)
+            IF PeekCh$ = "," THEN
+                fP = fP + 1
+            ELSE
+                SetErr 1
+            END IF
+            errA = fErr
+            tv# = ParseCmp#(0)
+            IF cond# = 0 THEN fErr = errA
+            IF PeekCh$ = "," THEN
+                fP = fP + 1
+            ELSE
+                SetErr 1
+            END IF
+            errB = fErr
+            fv# = ParseCmp#(0)
+            IF cond# <> 0 THEN fErr = errB
+            IF PeekCh$ = ")" THEN
+                fP = fP + 1
+            ELSE
+                SetErr 1
+            END IF
+            IF cond# <> 0 THEN
+                CallFunc# = tv#
+            ELSE
+                CallFunc# = fv#
+            END IF
+
+        CASE ELSE
+            n = 0
+            a1# = 0
+            a2# = 0
+            IF PeekCh$ <> ")" THEN
+                DO
+                    v# = ParseCmp#(0)
+                    n = n + 1
+                    IF n = 1 THEN
+                        a1# = v#
+                    ELSEIF n = 2 THEN
+                        a2# = v#
+                    ELSE
+                        SetErr 1
+                    END IF
+                    IF fErr <> 0 THEN EXIT DO
+                    IF PeekCh$ = "," THEN
+                        fP = fP + 1
+                    ELSE
+                        EXIT DO
+                    END IF
+                LOOP
+            END IF
+            IF PeekCh$ = ")" THEN
+                fP = fP + 1
+            ELSE
+                SetErr 1
+            END IF
+            IF fErr = 0 THEN
+                SELECT CASE nm$
+                    CASE "ABS"
+                        IF n = 1 THEN
+                            CallFunc# = ABS(a1#)
+                        ELSE
+                            SetErr 1
+                        END IF
+                    CASE "INT"
+                        IF n = 1 THEN
+                            CallFunc# = INT(a1#)
+                        ELSE
+                            SetErr 1
+                        END IF
+                    CASE "SQR", "SQRT"
+                        IF n = 1 AND a1# >= 0 THEN
+                            CallFunc# = SQR(a1#)
+                        ELSE
+                            SetErr 1
+                        END IF
+                    CASE "ROUND"
+                        IF n = 2 AND a2# >= 0 AND a2# <= 8 THEN
+                            p# = 10 ^ INT(a2#)
+                            IF ABS(a1#) > 1E+15 THEN
+                                CallFunc# = a1#
+                            ELSE
+                                CallFunc# = SGN(a1#) * INT(ABS(a1#) * p# + .5) / p#
+                            END IF
+                        ELSE
+                            SetErr 1
+                        END IF
+                    CASE "PI"
+                        IF n = 0 THEN
+                            CallFunc# = 3.14159265358979#
+                        ELSE
+                            SetErr 1
+                        END IF
+                    CASE ELSE
+                        SetErr 1
+                END SELECT
+            END IF
+    END SELECT
+END FUNCTION
+
+' Valor de una celda (calcula y guarda en cache si hace falta)
+FUNCTION CellValue# (sl, r, c)
+    DIM raw$, sv$, sp, se, ce, v#, k
+    IF SSState(sl, r, c) = 2 THEN
+        IF SSErr(sl, r, c) <> 0 THEN SetErr SSErr(sl, r, c)
+        CellValue# = SSVal(sl, r, c)
+        EXIT FUNCTION
+    END IF
+    raw$ = SSRaw$(sl, r, c)
+    k = CellKind(raw$)
+    IF k <> 3 THEN
+        IF k = 1 THEN
+            SSVal(sl, r, c) = VAL(raw$)
+        ELSE
+            SSVal(sl, r, c) = 0
+        END IF
+        SSErr(sl, r, c) = 0
+        SSState(sl, r, c) = 2
+        CellValue# = SSVal(sl, r, c)
+        EXIT FUNCTION
+    END IF
+    IF SSState(sl, r, c) = 1 THEN
+        SetErr 2
+        CellValue# = 0
+        EXIT FUNCTION
+    END IF
+    SSState(sl, r, c) = 1
+    sv$ = fS$
+    sp = fP
+    se = fErr
+    fS$ = PrepFormula$(MID$(raw$, 2))
+    fP = 1
+    fErr = 0
+    v# = ParseCmp#(0)
+    IF fErr = 0 AND fP <= LEN(fS$) THEN fErr = 1
+    IF fErr <> 0 THEN v# = 0
+    SSVal(sl, r, c) = v#
+    SSErr(sl, r, c) = fErr
+    ce = fErr
+    fS$ = sv$
+    fP = sp
+    fErr = se
+    SSState(sl, r, c) = 2
+    IF ce <> 0 THEN SetErr ce
+    CellValue# = v#
+END FUNCTION
+
+' Recalcula toda la hoja sl
+SUB SSRecalc (sl)
+    DIM r, c, dummy#
+    fSlot = sl
+    fS$ = ""
+    fP = 1
+    fErr = 0
+    FOR r = 1 TO MAXROWS
+        FOR c = 1 TO MAXCOLS
+            SSState(sl, r, c) = 0
+        NEXT
+    NEXT
+    FOR r = 1 TO MAXROWS
+        FOR c = 1 TO MAXCOLS
+            IF SSRaw$(sl, r, c) <> "" THEN
+                fErr = 0
+                dummy# = CellValue#(sl, r, c)
+            END IF
+        NEXT
+    NEXT
+    fErr = 0
+END SUB
+
+'--------------------------------------------------------------
+'  FORMATO DE NUMEROS
+'--------------------------------------------------------------
+' Numero con dec decimales fijos
+FUNCTION FixNum$ (v#, dec)
+    DIM sg$, a#, sc#, t$, ip$, fp$
+    sg$ = ""
+    a# = v#
+    IF a# < 0 THEN
+        sg$ = "-"
+        a# = -a#
+    END IF
+    IF a# * 10 ^ dec >= 1E+14 THEN
+        FixNum$ = LTRIM$(STR$(v#))
+        EXIT FUNCTION
+    END IF
+    sc# = INT(a# * 10 ^ dec + .5)
+    IF sc# = 0 THEN sg$ = ""
+    t$ = LTRIM$(STR$(sc#))
+    IF LEN(t$) <= dec THEN t$ = STRING$(dec + 1 - LEN(t$), "0") + t$
+    IF dec = 0 THEN
+        FixNum$ = sg$ + t$
+    ELSE
+        ip$ = LEFT$(t$, LEN(t$) - dec)
+        fp$ = RIGHT$(t$, dec)
+        FixNum$ = sg$ + ip$ + "." + fp$
+    END IF
+END FUNCTION
+
+' Formato general: hasta 6 decimales, sin ceros sobrantes, que quepa en w
+FUNCTION GenNum$ (v#, w)
+    DIM d, t$
+    FOR d = 6 TO 0 STEP -1
+        t$ = FixNum$(v#, d)
+        IF d > 0 AND INSTR(t$, ".") > 0 AND INSTR(t$, "E") = 0 AND INSTR(t$, "D") = 0 THEN
+            DO WHILE RIGHT$(t$, 1) = "0"
+                t$ = LEFT$(t$, LEN(t$) - 1)
+            LOOP
+            IF RIGHT$(t$, 1) = "." THEN t$ = LEFT$(t$, LEN(t$) - 1)
+        END IF
+        IF LEN(t$) <= w THEN
+            GenNum$ = t$
+            EXIT FUNCTION
+        END IF
+    NEXT
+    GenNum$ = STRING$(w, "*")
+END FUNCTION
+
+FUNCTION FormatNum$ (v#, dec, w)
+    DIM t$
+    IF dec >= 0 THEN
+        t$ = FixNum$(v#, dec)
+        IF LEN(t$) > w THEN t$ = STRING$(w, "*")
+    ELSE
+        t$ = GenNum$(v#, w)
+    END IF
+    FormatNum$ = t$
+END FUNCTION
+
+'--------------------------------------------------------------
+'  PANTALLA
+'--------------------------------------------------------------
+SUB SSRedraw
+    DIM s, w, nv, i, k, r, c, ck, rlo, rhi, clo, chi
+    DIM st$, rt$, raw$, seg$, carry$, t$
+    s = sSlot
+    w = SSColW(s)
+    nv = 75 \ w
+    IF nv < 1 THEN nv = 1
+    IF sR < 1 THEN sR = 1
+    IF sR > MAXROWS THEN sR = MAXROWS
+    IF sC < 1 THEN sC = 1
+    IF sC > MAXCOLS THEN sC = MAXCOLS
+    IF sC < sLeftC THEN sLeftC = sC
+    IF sC > sLeftC + nv - 1 THEN sLeftC = sC - nv + 1
+    IF sLeftC > MAXCOLS - nv + 1 THEN sLeftC = MAXCOLS - nv + 1
+    IF sLeftC < 1 THEN sLeftC = 1
+    IF sR < sTopR THEN sTopR = sR
+    IF sR > sTopR + SSROWS - 1 THEN sTopR = sR - SSROWS + 1
+    IF sTopR < 1 THEN sTopR = 1
+
+    ' Barra de titulo
+    st$ = RTRIM$(Desk(sIdx).Nombre) + " (Hoja de calculo)"
+    IF Desk(sIdx).Modificado THEN st$ = st$ + " *"
+    TitleBar st$
+
+    ' Linea de contenido de la celda actual
+    raw$ = SSRaw$(s, sR, sC)
+    st$ = " " + CellAddr$(sR, sC) + ": " + LEFT$(raw$, 40)
+    IF StatusMsg$ <> "" THEN
+        rt$ = StatusMsg$
+        StatusMsg$ = ""
+    ELSEIF CellKind(raw$) = 3 THEN
+        IF SSErr(s, sR, sC) <> 0 THEN
+            rt$ = "= " + ErrText$(SSErr(s, sR, sC))
+        ELSE
+            rt$ = "= " + GenNum$(SSVal(s, sR, sC), 20)
+        END IF
+    ELSE
+        rt$ = ""
+    END IF
+    PrintAt 2, 1, LEFT$(st$ + SPACE$(50), 50) + LEFT$(rt$ + SPACE$(29), 29), 14, 0
+
+    ' Encabezados de columnas
+    COLOR 3, 0
+    LOCATE 3, 1
+    PRINT SPACE$(79);
+    FOR k = 0 TO nv - 1
+        c = sLeftC + k
+        IF c <= MAXCOLS THEN
+            t$ = LEFT$(SPACE$((w - 1) \ 2) + CHR$(64 + c) + SPACE$(w), w)
+            IF c = sC THEN COLOR 0, 3 ELSE COLOR 3, 0
+            LOCATE 3, 5 + k * w
+            PRINT t$;
+        END IF
+    NEXT
+    COLOR 7, 0
+
+    ' Rango marcado
+    rlo = sR
+    rhi = sR
+    clo = sC
+    chi = sC
+    IF sAnchR > 0 THEN
+        rlo = sAnchR
+        rhi = sR
+        IF rlo > rhi THEN SWAP rlo, rhi
+        clo = sAnchC
+        chi = sC
+        IF clo > chi THEN SWAP clo, chi
+    END IF
+
+    ' Filas
+    FOR i = 0 TO SSROWS - 1
+        r = sTopR + i
+        IF r <= MAXROWS THEN
+            LOCATE 4 + i, 1
+            IF r = sR THEN COLOR 0, 3 ELSE COLOR 3, 0
+            PRINT RIGHT$("   " + N2S$(r), 3) + " ";
+            carry$ = ""
+            FOR k = 0 TO nv - 1
+                c = sLeftC + k
+                IF c <= MAXCOLS THEN
+                    raw$ = SSRaw$(s, r, c)
+                    ck = CellKind(raw$)
+                    IF ck = 0 THEN
+                        IF carry$ <> "" THEN
+                            seg$ = LEFT$(carry$ + SPACE$(w), w)
+                            carry$ = MID$(carry$, w + 1)
+                        ELSE
+                            seg$ = SPACE$(w)
+                        END IF
+                    ELSEIF ck = 2 THEN
+                        t$ = DisplayText$(raw$)
+                        seg$ = LEFT$(t$ + SPACE$(w), w)
+                        carry$ = MID$(t$, w + 1)
+                    ELSE
+                        carry$ = ""
+                        IF SSErr(s, r, c) <> 0 THEN
+                            t$ = LEFT$(ErrText$(SSErr(s, r, c)), w)
+                        ELSE
+                            t$ = FormatNum$(SSVal(s, r, c), SSDec(s), w)
+                        END IF
+                        seg$ = RIGHT$(SPACE$(w) + t$, w)
+                    END IF
+                    IF r = sR AND c = sC THEN
+                        COLOR 0, 7
+                    ELSEIF sAnchR > 0 AND r >= rlo AND r <= rhi AND c >= clo AND c <= chi THEN
+                        COLOR 15, 1
+                    ELSEIF ck <> 0 AND SSErr(s, r, c) <> 0 THEN
+                        COLOR 12, 0
+                    ELSE
+                        COLOR 7, 0
+                    END IF
+                    LOCATE 4 + i, 5 + k * w
+                    PRINT seg$;
+                ELSE
+                    COLOR 7, 0
+                    LOCATE 4 + i, 5 + k * w
+                    PRINT SPACE$(w);
+                END IF
+            NEXT
+            COLOR 7, 0
+            IF 75 - nv * w > 0 THEN
+                LOCATE 4 + i, 5 + nv * w
+                PRINT SPACE$(75 - nv * w);
+            END IF
+        ELSE
+            COLOR 7, 0
+            LOCATE 4 + i, 1
+            PRINT SPACE$(79);
+        END IF
+    NEXT
+    COLOR 7, 0
+
+    HelpBar "Esc ^S:guardar ^P:imprimir ^G:ir a F2:editar F3-F6:rango Supr:borrar F1:ayuda"
+    LOCATE , , 0
+    CursorWanted = 0
+END SUB
+
+SUB SSHelp
+    DIM k$
+    CLS
+    TitleBar "Ayuda - Hoja de calculo"
+    PrintAt 3, 3, "MOVIMIENTO", 14, 0
+    PrintAt 4, 5, "Flechas, Tab: mover   RePag/AvPag: pagina   Inicio/Fin: col. A / ultima", 7, 0
+    PrintAt 5, 5, "Ctrl+Inicio: celda A1    Ctrl+G: ir a una celda (ej. C12)", 7, 0
+    PrintAt 7, 3, "ENTRADA", 14, 0
+    PrintAt 8, 5, "Escriba en la celda y presione Enter. Enter o F2 edita la celda.", 7, 0
+    PrintAt 9, 5, "Numero: 12.5    Texto: Ventas    Texto forzado: " + CHR$(34) + "2024", 7, 0
+    PrintAt 11, 3, "FORMULAS", 14, 0
+    PrintAt 12, 5, "=A1+B2*2    o    +A1+B2    o    @SUM(A1:A9)", 7, 0
+    PrintAt 13, 5, "Operadores: + - * / ^   Comparaciones: < > = <= >= <>", 7, 0
+    PrintAt 14, 5, "Funciones: SUM AVG MIN MAX COUNT (aceptan rangos como A1:B5)", 7, 0
+    PrintAt 15, 5, "           ABS INT SQR ROUND(x,n) IF(cond,si,no) PI", 7, 0
+    PrintAt 16, 5, "Referencia absoluta: $A$1 (no cambia al copiar y pegar)", 7, 0
+    PrintAt 18, 3, "RANGOS Y FORMATO", 14, 0
+    PrintAt 19, 5, "F3: marcar esquina del rango (otra vez: quitar)   F4: copiar", 7, 0
+    PrintAt 20, 5, "F5: cortar    F6: pegar (las formulas se ajustan)    Supr: borrar", 7, 0
+    PrintAt 21, 5, "Ctrl+W: ancho de columna    Ctrl+D: decimales    Ctrl+S: guardar", 7, 0
+    PrintAt 22, 5, "Ctrl+P: imprimir     El portapapeles es comun con textos y bases de datos", 7, 0
+    HelpBar "Presione una tecla para volver"
+    k$ = GetKey$
+END SUB
+
+'--------------------------------------------------------------
+'  EDICION
+'--------------------------------------------------------------
+' Rango actual (marcado o solo la celda del cursor)
+SUB SSRange (r1, c1, r2, c2)
+    IF sAnchR = 0 THEN
+        r1 = sR
+        r2 = sR
+        c1 = sC
+        c2 = sC
+    ELSE
+        r1 = sAnchR
+        r2 = sR
+        IF r1 > r2 THEN SWAP r1, r2
+        c1 = sAnchC
+        c2 = sC
+        IF c1 > c2 THEN SWAP c1, c2
+    END IF
+END SUB
+
+SUB SSSetCell (sl, r, c, t$)
+    DIM raw$
+    raw$ = NormalizeEntry$(t$)
+    IF raw$ = SSRaw$(sl, r, c) THEN EXIT SUB
+    SSRaw$(sl, r, c) = raw$
+    Desk(sIdx).Modificado = -1
+    SSRecalc sl
+END SUB
+
+' Escribe/edita la celda actual en la linea de entrada
+SUB SSEnter (init$)
+    DIM t$
+    PrintAt 2, 1, LEFT$(" " + CellAddr$(sR, sC) + ">" + SPACE$(79), 79), 11, 0
+    t$ = ReadLine$(2, 7, 60, init$)
+    IF Cancelled THEN EXIT SUB
+    SSSetCell sSlot, sR, sC, t$
+    IF sR < MAXROWS THEN sR = sR + 1
+END SUB
+
+SUB SSClear
+    DIM r1, c1, r2, c2, r, c
+    SSRange r1, c1, r2, c2
+    FOR r = r1 TO r2
+        FOR c = c1 TO c2
+            SSRaw$(sSlot, r, c) = ""
+        NEXT
+    NEXT
+    sAnchR = 0
+    Desk(sIdx).Modificado = -1
+    SSRecalc sSlot
+END SUB
+
+' doCut = 0 copia, doCut = -1 corta
+SUB SSCopy (doCut)
+    DIM r1, c1, r2, c2, r, c
+    SSRange r1, c1, r2, c2
+    SSClipRows = r2 - r1 + 1
+    SSClipCols = c2 - c1 + 1
+    SSClipR0 = r1
+    SSClipC0 = c1
+    FOR r = r1 TO r2
+        FOR c = c1 TO c2
+            SSClip$(r - r1 + 1, c - c1 + 1) = SSRaw$(sSlot, r, c)
+            GClip$(r - r1 + 1, c - c1 + 1) = SSPlain$(sSlot, r, c)
+            IF doCut THEN SSRaw$(sSlot, r, c) = ""
+        NEXT
+    NEXT
+    GKind = 2
+    GRows = SSClipRows
+    GCols = SSClipCols
+    IF doCut THEN
+        Desk(sIdx).Modificado = -1
+        SSRecalc sSlot
+        StatusMsg$ = "Rango cortado (" + N2S$(SSClipRows) + "x" + N2S$(SSClipCols) + " celdas)"
+    ELSE
+        StatusMsg$ = "Rango copiado (" + N2S$(SSClipRows) + "x" + N2S$(SSClipCols) + " celdas)"
+    END IF
+    sAnchR = 0
+END SUB
+
+SUB SSPaste
+    DIM r, c, dr, dc, raw$
+    IF GKind = 1 OR GKind = 3 THEN
+        SSPasteForeign
+        EXIT SUB
+    END IF
+    IF SSClipRows = 0 THEN
+        StatusMsg$ = "No hay nada copiado"
+        EXIT SUB
+    END IF
+    IF sR + SSClipRows - 1 > MAXROWS OR sC + SSClipCols - 1 > MAXCOLS THEN
+        StatusMsg$ = "No cabe en la hoja desde esta celda"
+        EXIT SUB
+    END IF
+    dr = sR - SSClipR0
+    dc = sC - SSClipC0
+    FOR r = 1 TO SSClipRows
+        FOR c = 1 TO SSClipCols
+            raw$ = SSClip$(r, c)
+            IF LEFT$(raw$, 1) = "=" THEN raw$ = AdjustFormula$(raw$, dr, dc)
+            SSRaw$(sSlot, sR + r - 1, sC + c - 1) = raw$
+        NEXT
+    NEXT
+    sAnchR = 0
+    Desk(sIdx).Modificado = -1
+    SSRecalc sSlot
+    StatusMsg$ = "Rango pegado"
+END SUB
+
+' Desplaza las referencias relativas de una formula (dr filas, dc columnas)
+FUNCTION AdjustFormula$ (f$, dr, dc)
+    DIM o$, i, n, ch$, p, absC, absR, cc, rr, num$, ok, bad
+    o$ = "="
+    i = 2
+    n = LEN(f$)
+    DO WHILE i <= n
+        ch$ = MID$(f$, i, 1)
+        ok = 0
+        IF ch$ = "$" OR (ch$ >= "A" AND ch$ <= "Z") THEN
+            p = i
+            absC = 0
+            absR = 0
+            IF MID$(f$, p, 1) = "$" THEN
+                absC = -1
+                p = p + 1
+            END IF
+            IF p <= n THEN
+                IF MID$(f$, p, 1) >= "A" AND MID$(f$, p, 1) <= "Z" THEN
+                    cc = ASC(MID$(f$, p, 1)) - 64
+                    p = p + 1
+                    IF p <= n THEN
+                        IF MID$(f$, p, 1) = "$" THEN
+                            absR = -1
+                            p = p + 1
+                        END IF
+                    END IF
+                    num$ = ""
+                    DO WHILE p <= n
+                        IF MID$(f$, p, 1) >= "0" AND MID$(f$, p, 1) <= "9" THEN
+                            num$ = num$ + MID$(f$, p, 1)
+                            p = p + 1
+                        ELSE
+                            EXIT DO
+                        END IF
+                    LOOP
+                    IF num$ <> "" AND LEN(num$) <= 4 THEN ok = -1
+                END IF
+            END IF
+        END IF
+        IF ok THEN
+            rr = VAL(num$)
+            bad = 0
+            IF NOT absC THEN cc = cc + dc
+            IF NOT absR THEN rr = rr + dr
+            IF cc < 1 OR cc > MAXCOLS OR rr < 1 OR rr > MAXROWS THEN bad = -1
+            IF bad THEN
+                o$ = o$ + "A0"
+            ELSE
+                IF absC THEN o$ = o$ + "$"
+                o$ = o$ + CHR$(64 + cc)
+                IF absR THEN o$ = o$ + "$"
+                o$ = o$ + N2S$(rr)
+            END IF
+            i = p
+        ELSEIF ch$ >= "A" AND ch$ <= "Z" THEN
+            DO WHILE i <= n
+                ch$ = MID$(f$, i, 1)
+                IF ch$ >= "A" AND ch$ <= "Z" THEN
+                    o$ = o$ + ch$
+                    i = i + 1
+                ELSE
+                    EXIT DO
+                END IF
+            LOOP
+        ELSE
+            o$ = o$ + ch$
+            i = i + 1
+        END IF
+    LOOP
+    AdjustFormula$ = o$
+END FUNCTION
+
+' Convierte "C12" en fila y columna. Devuelve -1 si es valida.
+FUNCTION ParseAddr (a$, r, c)
+    DIM t$, num$, i
+    ParseAddr = 0
+    t$ = UCASE$(LTRIM$(RTRIM$(a$)))
+    IF LEN(t$) < 2 OR LEN(t$) > 5 THEN EXIT FUNCTION
+    IF LEFT$(t$, 1) < "A" OR LEFT$(t$, 1) > "Z" THEN EXIT FUNCTION
+    num$ = MID$(t$, 2)
+    FOR i = 1 TO LEN(num$)
+        IF MID$(num$, i, 1) < "0" OR MID$(num$, i, 1) > "9" THEN EXIT FUNCTION
+    NEXT
+    IF VAL(num$) < 1 OR VAL(num$) > MAXROWS THEN EXIT FUNCTION
+    IF ASC(LEFT$(t$, 1)) - 64 > MAXCOLS THEN EXIT FUNCTION
+    r = VAL(num$)
+    c = ASC(LEFT$(t$, 1)) - 64
+    ParseAddr = -1
+END FUNCTION
+
+SUB SSGoto
+    DIM a$, r, c
+    a$ = PromptLine$("Ir a celda (ej. C12):", "")
+    IF Cancelled OR a$ = "" THEN EXIT SUB
+    IF ParseAddr(a$, r, c) THEN
+        sR = r
+        sC = c
+    ELSE
+        StatusMsg$ = "Celda no valida: " + a$
+    END IF
+END SUB
+
+SUB SSWidth
+    DIM a$, v, s
+    s = sSlot
+    a$ = PromptLine$("Ancho de columna (5-20):", N2S$(SSColW(s)))
+    IF Cancelled OR a$ = "" THEN EXIT SUB
+    v = VAL(a$)
+    IF v < 5 OR v > 20 THEN
+        StatusMsg$ = "El ancho debe estar entre 5 y 20"
+    ELSE
+        SSColW(s) = v
+        Desk(sIdx).Modificado = -1
+    END IF
+END SUB
+
+SUB SSDecimals
+    DIM a$, v, s, d$
+    s = sSlot
+    IF SSDec(s) < 0 THEN d$ = "G" ELSE d$ = N2S$(SSDec(s))
+    a$ = PromptLine$("Decimales 0-8 (G = general):", d$)
+    IF Cancelled OR a$ = "" THEN EXIT SUB
+    IF UCASE$(LEFT$(a$, 1)) = "G" THEN
+        SSDec(s) = -1
+        Desk(sIdx).Modificado = -1
+    ELSE
+        v = VAL(a$)
+        IF v < 0 OR v > 8 THEN
+            StatusMsg$ = "Use un numero de 0 a 8, o G"
+        ELSE
+            SSDec(s) = v
+            Desk(sIdx).Modificado = -1
+        END IF
+    END IF
+END SUB
+
+'--------------------------------------------------------------
+'  EDITOR PRINCIPAL DE LA HOJA
+'--------------------------------------------------------------
+SUB SSEdit (idx)
+    DIM k$, s, v, c
+    sIdx = idx
+    sSlot = Desk(idx).Slot
+    s = sSlot
+    sR = SSCurR(s)
+    sC = SSCurC(s)
+    sTopR = SSTopR(s)
+    sLeftC = SSLeftC(s)
+    sAnchR = 0
+    sAnchC = 0
+    StatusMsg$ = ""
+    SSRecalc s
+    DO
+        SSRedraw
+        k$ = GetKey$
+        SELECT CASE k$
+            CASE CHR$(27)
+                EXIT DO
+            CASE CHR$(0) + "H"
+                IF sR > 1 THEN sR = sR - 1
+            CASE CHR$(0) + "P"
+                IF sR < MAXROWS THEN sR = sR + 1
+            CASE CHR$(0) + "K"
+                IF sC > 1 THEN sC = sC - 1
+            CASE CHR$(0) + "M", CHR$(9)
+                IF sC < MAXCOLS THEN sC = sC + 1
+            CASE CHR$(0) + "I"
+                sR = sR - SSROWS
+                IF sR < 1 THEN sR = 1
+            CASE CHR$(0) + "Q"
+                sR = sR + SSROWS
+                IF sR > MAXROWS THEN sR = MAXROWS
+            CASE CHR$(0) + "G"
+                sC = 1
+            CASE CHR$(0) + "O"
+                c = 1
+                FOR v = 1 TO MAXCOLS
+                    IF SSRaw$(s, sR, v) <> "" THEN c = v
+                NEXT
+                sC = c
+            CASE CHR$(0) + "w"
+                sR = 1
+                sC = 1
+            CASE CHR$(13), CHR$(0) + "<"
+                SSEnter SSRaw$(s, sR, sC)
+            CASE CHR$(0) + "S"
+                SSClear
+            CASE CHR$(19)
+                IF SaveOne(idx) THEN StatusMsg$ = "Archivo guardado" ELSE StatusMsg$ = "No se guardo el archivo"
+            CASE CHR$(7)
+                SSGoto
+            CASE CHR$(23)
+                SSWidth
+            CASE CHR$(4)
+                SSDecimals
+            CASE CHR$(0) + ";"
+                SSHelp
+            CASE CHR$(0) + "="
+                IF sAnchR > 0 THEN
+                    sAnchR = 0
+                ELSE
+                    sAnchR = sR
+                    sAnchC = sC
+                END IF
+            CASE CHR$(0) + ">"
+                SSCopy 0
+            CASE CHR$(0) + "?"
+                SSCopy -1
+            CASE CHR$(0) + "@"
+                SSPaste
+            CASE CHR$(16)
+                PrintDoc idx
+            CASE ELSE
+                IF LEN(k$) = 1 THEN
+                    IF ASC(k$) >= 32 AND ASC(k$) <> 127 THEN SSEnter k$
+                END IF
+        END SELECT
+    LOOP
+    SSCurR(s) = sR
+    SSCurC(s) = sC
+    SSTopR(s) = sTopR
+    SSLeftC(s) = sLeftC
+    LOCATE , , 0
+    CursorWanted = 0
+END SUB
+
+'--------------------------------------------------------------
+'  ETAPA 5: PORTAPAPELES COMUN E IMPRESION
+'--------------------------------------------------------------
+' Contenido de una celda como texto (para el portapapeles comun)
+FUNCTION SSPlain$ (sl, r, c)
+    DIM raw$, k
+    raw$ = SSRaw$(sl, r, c)
+    k = CellKind(raw$)
+    SSPlain$ = ""
+    IF k = 1 THEN
+        SSPlain$ = raw$
+    ELSEIF k = 2 THEN
+        SSPlain$ = DisplayText$(raw$)
+    ELSEIF k = 3 THEN
+        IF SSErr(sl, r, c) <> 0 THEN
+            SSPlain$ = ErrText$(SSErr(sl, r, c))
+        ELSEIF SSDec(sl) >= 0 THEN
+            SSPlain$ = FixNum$(SSVal(sl, r, c), SSDec(sl))
+        ELSE
+            SSPlain$ = GenNum$(SSVal(sl, r, c), 20)
+        END IF
+    END IF
+END FUNCTION
+
+' Celda formateada al ancho de columna (para imprimir)
+FUNCTION SSCellStr$ (sl, r, c)
+    DIM raw$, k, w, t$
+    w = SSColW(sl)
+    raw$ = SSRaw$(sl, r, c)
+    k = CellKind(raw$)
+    IF k = 0 THEN
+        SSCellStr$ = SPACE$(w)
+    ELSEIF k = 2 THEN
+        SSCellStr$ = LEFT$(DisplayText$(raw$) + SPACE$(w), w)
+    ELSE
+        IF SSErr(sl, r, c) <> 0 THEN
+            t$ = LEFT$(ErrText$(SSErr(sl, r, c)), w)
+        ELSE
+            t$ = FormatNum$(SSVal(sl, r, c), SSDec(sl), w)
+        END IF
+        SSCellStr$ = RIGHT$(SPACE$(w) + t$, w)
+    END IF
+END FUNCTION
+
+' Texto que llega de otro modulo: numeros se quedan como numeros y
+' lo demas como texto (nunca como formula)
+FUNCTION ForeignEntry$ (t$)
+    DIM x$, f$
+    x$ = LTRIM$(RTRIM$(t$))
+    ForeignEntry$ = x$
+    IF x$ = "" THEN EXIT FUNCTION
+    IF IsNumber(x$) THEN EXIT FUNCTION
+    f$ = LEFT$(x$, 1)
+    IF f$ = "=" OR f$ = "+" OR f$ = "-" OR f$ = "(" OR f$ = "@" OR f$ = CHR$(34) THEN
+        ForeignEntry$ = CHR$(34) + x$
+    END IF
+END FUNCTION
+
+' Pega en la hoja lo copiado en un archivo de texto o en una base de datos
+SUB SSPasteForeign
+    DIM i, j, rowN, r0, c0, maxC
+    DIM rv$(1 TO MAXCOLS)
+    r0 = sR
+    c0 = sC
+    IF GRows < 1 THEN
+        StatusMsg$ = "El portapapeles esta vacio"
+        EXIT SUB
+    END IF
+    IF r0 + GRows - 1 > MAXROWS THEN
+        StatusMsg$ = "No cabe en la hoja desde esta celda"
+        EXIT SUB
+    END IF
+    maxC = 0
+    FOR i = 1 TO GRows
+        IF GKind = 1 THEN
+            SplitCells GClip$(i, 1)
+            rowN = SplitN
+        ELSE
+            rowN = GCols
+        END IF
+        IF rowN > maxC THEN maxC = rowN
+    NEXT
+    IF c0 + maxC - 1 > MAXCOLS THEN
+        StatusMsg$ = "No caben las columnas desde esta celda"
+        EXIT SUB
+    END IF
+    FOR i = 1 TO GRows
+        IF GKind = 1 THEN
+            SplitCells GClip$(i, 1)
+            rowN = SplitN
+            FOR j = 1 TO rowN
+                rv$(j) = SplitCell$(j)
+            NEXT
+        ELSE
+            rowN = GCols
+            FOR j = 1 TO rowN
+                rv$(j) = GClip$(i, j)
+            NEXT
+        END IF
+        FOR j = 1 TO rowN
+            SSRaw$(sSlot, r0 + i - 1, c0 + j - 1) = ForeignEntry$(rv$(j))
+        NEXT
+    NEXT
+    sAnchR = 0
+    Desk(sIdx).Modificado = -1
+    SSRecalc sSlot
+    StatusMsg$ = "Pegado desde el portapapeles comun"
+END SUB
